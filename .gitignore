@@ -1,0 +1,11 @@
+.env
+*.pyc
+__pycache__/
+.DS_Store
+*.egg-info/
+dist/
+.venv/
+venv/
+data/
+*.json
+!pyproject.toml
