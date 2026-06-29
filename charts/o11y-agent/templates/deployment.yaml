@@ -1,0 +1,134 @@
+{{- if eq .Values.mode.type "streaming" }}
+# Streaming mode: always-on Deployment with OTLP receiver + scheduled batch assessments.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "o11y-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "o11y-agent.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Force pod restart when config changes
+        checksum/secret-splunk: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "o11y-agent.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: o11y-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          command:
+            - python3
+            - main.py
+            - --realm
+            - {{ .Values.splunk.realm | quote }}
+            - --environment
+            - {{ .Values.splunk.environment | quote }}
+            - --streaming
+            - --interval
+            - {{ .Values.mode.intervalMinutes | quote }}
+            {{- if .Values.mode.autoApply }}
+            - --auto-apply
+            {{- end }}
+
+          ports:
+            - name: otlp-http
+              containerPort: {{ .Values.receiver.port }}
+              protocol: TCP
+            - name: status
+              containerPort: {{ .Values.receiver.port }}
+              protocol: TCP
+
+          env:
+            - name: SPLUNK_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "o11y-agent.splunkSecretName" . }}
+                  key: SPLUNK_ACCESS_TOKEN
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "o11y-agent.awsSecretName" . }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "o11y-agent.awsSecretName" . }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.aws.region | quote }}
+            {{- if .Values.aws.bedrockModelId }}
+            - name: BEDROCK_MODEL_ID
+              value: {{ .Values.aws.bedrockModelId | quote }}
+            {{- end }}
+            - name: OTLP_RECEIVER_PORT
+              value: {{ .Values.receiver.port | quote }}
+            - name: OTLP_RECEIVER_HOST
+              value: {{ .Values.receiver.host | quote }}
+            {{- if .Values.alerts.webhookUrl }}
+            - name: ALERT_WEBHOOK_URL
+              value: {{ .Values.alerts.webhookUrl | quote }}
+            {{- end }}
+            - name: ALERT_COOLDOWN_SECONDS
+              value: {{ .Values.alerts.cooldownSeconds | quote }}
+            {{- if .Values.toolPaths.provisioner }}
+            - name: PROVISIONER_PATH
+              value: {{ .Values.toolPaths.provisioner | quote }}
+            {{- end }}
+            {{- if .Values.toolPaths.governance }}
+            - name: GOVERNANCE_PATH
+              value: {{ .Values.toolPaths.governance | quote }}
+            {{- end }}
+            {{- if .Values.toolPaths.analyzer }}
+            - name: ANALYZER_PATH
+              value: {{ .Values.toolPaths.analyzer | quote }}
+            {{- end }}
+            {{- if .Values.toolPaths.healthCheck }}
+            - name: HEALTH_CHECK_PATH
+              value: {{ .Values.toolPaths.healthCheck | quote }}
+            {{- end }}
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: otlp-http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: otlp-http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          volumeMounts:
+            - name: state
+              mountPath: /home/agent/.o11y-agent
+
+      volumes:
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "o11y-agent.fullname" . }}-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

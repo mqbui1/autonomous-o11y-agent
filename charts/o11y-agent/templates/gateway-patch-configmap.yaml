@@ -1,0 +1,82 @@
+{{- if .Values.gatewayPatch.enabled }}
+# ── Gateway Collector Patch ───────────────────────────────────────────────────
+# This ConfigMap contains the values.yaml fragment to merge into your
+# splunk-otel-collector gateway Helm release so it fans out telemetry
+# to this agent's OTLP/HTTP receiver.
+#
+# Apply with:
+#   helm upgrade splunk-otel-collector splunk-otel/splunk-otel-collector \
+#     -f <(kubectl get cm {{ include "o11y-agent.fullname" . }}-gateway-patch \
+#              -o jsonpath='{.data.values\.yaml}')
+#
+# Or merge the contents manually into your existing gateway values file.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}-gateway-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+data:
+  values.yaml: |
+    # Merge this fragment into your splunk-otel-collector gateway values.yaml
+    # to fan out traces and metrics to the O11y Agent OTLP receiver.
+    #
+    # The agent endpoint resolves via Kubernetes DNS:
+    #   {{ include "o11y-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.receiver.port }}
+
+    gateway:
+      config:
+        exporters:
+          otlp/o11y_agent:
+            endpoint: "http://{{ include "o11y-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.receiver.port }}"
+            tls:
+              insecure: true
+            sending_queue:
+              enabled: true
+              num_consumers: 2
+              queue_size: 100
+            retry_on_failure:
+              enabled: false    # advisory path — never block on agent unavailability
+            timeout: 5s
+
+        service:
+          pipelines:
+            traces:
+              exporters:
+                - splunk_hec/traces
+                - signalfx
+                - otlp/o11y_agent     # fan out to agent
+            metrics:
+              exporters:
+                - signalfx
+                - otlp/o11y_agent     # fan out to agent
+            # logs: add otlp/o11y_agent here when log scanning is enabled
+
+  # Standalone gateway config snippet (for non-Helm deployments)
+  gateway-config-snippet.yaml: |
+    # Add to your gateway OTel Collector config under exporters:
+    exporters:
+      otlp/o11y_agent:
+        endpoint: "http://{{ include "o11y-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.receiver.port }}"
+        tls:
+          insecure: true
+        sending_queue:
+          enabled: true
+          num_consumers: 2
+          queue_size: 100
+        retry_on_failure:
+          enabled: false
+        timeout: 5s
+
+    # Then add otlp/o11y_agent to your service.pipelines.traces.exporters
+    # and service.pipelines.metrics.exporters lists.
+    #
+    # IMPORTANT: otlp/o11y_agent must be LAST in the exporters list.
+    # If the agent is unavailable, the queue drops silently — it never
+    # blocks the primary Splunk export path.
+{{- end }}

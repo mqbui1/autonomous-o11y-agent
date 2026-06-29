@@ -47,3 +47,17 @@ class AgentConfig:
     subprocess_timeout: int = field(
         default_factory=lambda: int(os.environ.get("TOOL_TIMEOUT", "300"))
     )
+
+    # ── Streaming mode (gateway co-deployment) ────────────────────────────────
+    streaming_port: int = field(
+        default_factory=lambda: int(os.environ.get("OTLP_RECEIVER_PORT", "4318"))
+    )
+    streaming_host: str = field(
+        default_factory=lambda: os.environ.get("OTLP_RECEIVER_HOST", "0.0.0.0")
+    )
+    alert_webhook_url: str = field(
+        default_factory=lambda: os.environ.get("ALERT_WEBHOOK_URL", "")
+    )
+    alert_cooldown_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("ALERT_COOLDOWN_SECONDS", "300"))
+    )

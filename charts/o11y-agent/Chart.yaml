@@ -1,0 +1,21 @@
+apiVersion: v2
+name: o11y-agent
+description: >
+  Autonomous Observability Agent for Splunk Observability Cloud.
+  Deploys alongside the Splunk OTel Collector gateway to provide
+  real-time PII detection, attribute quality gating, cardinality
+  explosion prevention, and scheduled deep assessments.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - observability
+  - splunk
+  - opentelemetry
+  - monitoring
+  - ai-agent
+home: https://github.com/mqbui1/autonomous-o11y-agent
+sources:
+  - https://github.com/mqbui1/autonomous-o11y-agent
+maintainers:
+  - name: mqbui1
