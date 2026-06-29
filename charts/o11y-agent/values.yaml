@@ -1,0 +1,94 @@
+# ── Splunk connection ─────────────────────────────────────────────────────────
+splunk:
+  realm: "us1"
+  # accessToken: set via --set splunk.accessToken=... or existingSecret
+  accessToken: ""
+  existingSecret: ""        # name of existing Secret with key SPLUNK_ACCESS_TOKEN
+  environment: "production"
+
+# ── AWS Bedrock ───────────────────────────────────────────────────────────────
+aws:
+  region: "us-west-2"
+  # Credentials — use existingSecret in production (IRSA recommended on EKS)
+  accessKeyId: ""
+  secretAccessKey: ""
+  existingSecret: ""        # name of existing Secret with keys AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  # Override model ID (leave empty for default Claude Sonnet 4.6 profile)
+  bedrockModelId: ""
+
+# ── Agent mode ────────────────────────────────────────────────────────────────
+mode:
+  # streaming: always-on OTLP receiver + scheduled batch assessments
+  # batch:     CronJob only (no OTLP receiver)
+  type: streaming           # streaming | batch
+
+  # Batch assessment schedule (cron expression)
+  schedule: "0 * * * *"    # every hour
+
+  # Assessment interval in minutes (used in streaming mode for batch cadence)
+  intervalMinutes: 60
+
+  # auto-apply: deploy detectors automatically; false = dry-run
+  autoApply: false
+
+# ── Streaming receiver ────────────────────────────────────────────────────────
+receiver:
+  port: 4318
+  host: "0.0.0.0"
+
+# ── Alerting ──────────────────────────────────────────────────────────────────
+alerts:
+  # Webhook URL for streaming alerts (Slack incoming webhook, PagerDuty, etc.)
+  webhookUrl: ""
+  # Minimum seconds between identical alerts (deduplication window)
+  cooldownSeconds: 300
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+replicaCount: 1
+
+image:
+  repository: "ghcr.io/mqbui1/o11y-agent"
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}           # e.g. for IRSA: eks.amazonaws.com/role-arn: arn:aws:iam::...
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# Persistent volume for state files (~/.o11y-agent/)
+persistence:
+  enabled: true
+  storageClass: ""
+  size: "1Gi"
+  accessMode: ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 4318
+
+# ── Tool paths ────────────────────────────────────────────────────────────────
+# Override if tool projects are mounted at non-default locations
+toolPaths:
+  provisioner: ""
+  governance: ""
+  analyzer: ""
+  healthCheck: ""
+
+# ── Gateway collector patch ───────────────────────────────────────────────────
+# When enabled, renders a ConfigMap with the values to merge into your
+# splunk-otel-collector gateway deployment so it fans out to this agent.
+gatewayPatch:
+  enabled: true
+  # Namespace where splunk-otel-collector is deployed
+  collectorNamespace: "monitoring"
+  # Service name of the gateway collector deployment
+  collectorServiceName: "splunk-otel-collector-gateway"

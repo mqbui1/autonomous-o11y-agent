@@ -1,0 +1,20 @@
+{{- if eq .Values.mode.type "streaming" }}
+# ClusterIP service exposing the OTLP/HTTP receiver to the gateway collector.
+# The gateway's otlp/http exporter points at this service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: otlp-http
+      protocol: TCP
+      name: otlp-http
+  selector:
+    {{- include "o11y-agent.selectorLabels" . | nindent 4 }}
+{{- end }}

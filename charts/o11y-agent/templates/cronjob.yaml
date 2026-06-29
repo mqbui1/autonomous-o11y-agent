@@ -1,0 +1,85 @@
+{{- if eq .Values.mode.type "batch" }}
+# Batch mode: CronJob for periodic assessments (no OTLP receiver).
+# Use this when you don't need real-time PII/attribute detection and
+# want a simpler deployment with no persistent pod.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.mode.schedule | quote }}
+  concurrencyPolicy: Forbid       # never run two assessments simultaneously
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "o11y-agent.selectorLabels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "o11y-agent.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+
+          containers:
+            - name: o11y-agent
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+              command:
+                - python3
+                - main.py
+                - --realm
+                - {{ .Values.splunk.realm | quote }}
+                - --environment
+                - {{ .Values.splunk.environment | quote }}
+                {{- if .Values.mode.autoApply }}
+                - --auto-apply
+                {{- end }}
+
+              env:
+                - name: SPLUNK_ACCESS_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "o11y-agent.splunkSecretName" . }}
+                      key: SPLUNK_ACCESS_TOKEN
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "o11y-agent.awsSecretName" . }}
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "o11y-agent.awsSecretName" . }}
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.aws.region | quote }}
+                {{- if .Values.aws.bedrockModelId }}
+                - name: BEDROCK_MODEL_ID
+                  value: {{ .Values.aws.bedrockModelId | quote }}
+                {{- end }}
+
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+
+              volumeMounts:
+                - name: state
+                  mountPath: /home/agent/.o11y-agent
+
+          volumes:
+            - name: state
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "o11y-agent.fullname" . }}-state
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+{{- end }}

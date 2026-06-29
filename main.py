@@ -67,6 +67,10 @@ def parse_args():
                       help="Custom prompt instead of the default full assessment")
     mode.add_argument("--no-narrative", action="store_true",
                       help="Skip narrative synthesis (faster, raw agent output only)")
+    mode.add_argument("--streaming", action="store_true",
+                      help="Start OTLP/HTTP receiver for gateway co-deployment (always-on mode)")
+    mode.add_argument("--streaming-only", action="store_true",
+                      help="Streaming receiver only — no batch assessment (useful for testing)")
 
     paths = parser.add_argument_group("tool paths (override defaults)")
     paths.add_argument("--provisioner-path", type=Path, default=None)
@@ -95,7 +99,6 @@ def main():
 
     from config import AgentConfig
     from agent import build_agent
-    from narrator import generate_narrative
     from loop import run_once, watch
 
     config = AgentConfig(
@@ -131,6 +134,10 @@ def main():
 
     agent = build_agent(config)
 
+    if args.streaming or args.streaming_only:
+        _run_streaming(agent, config, args)
+        return  # streaming mode runs until killed
+
     if args.watch:
         watch(
             agent=agent,
@@ -140,18 +147,83 @@ def main():
     else:
         output = run_once(agent, config, prompt=args.prompt)
 
-        if args.no_narrative:
-            print(output)
-        else:
-            print("\n" + "="*70)
-            print("  AUTONOMOUS O11Y AGENT ASSESSMENT")
-            print("="*70 + "\n")
-            print(output)
-            print("\n" + "="*70)
-            print("  SUMMARY")
-            print("="*70 + "\n")
-            narrative = generate_narrative(output, config)
-            print(narrative)
+        print("\n" + "="*70)
+        print("  AUTONOMOUS O11Y AGENT ASSESSMENT")
+        print("="*70 + "\n")
+        print(output)
+        print("\n" + "="*70)
+
+
+def _run_streaming(agent, config, args):
+    """
+    Always-on mode for gateway co-deployment.
+
+    Starts the OTLP/HTTP receiver in a background thread, seeds it with
+    known services from Splunk, then runs batch assessments on schedule
+    (unless --streaming-only is set).
+    """
+    import time
+    from streaming.pipeline import StreamingPipeline
+    from receiver.otlp_receiver import start_receiver
+
+    logger.info(
+        "Starting streaming mode — OTLP receiver on %s:%d",
+        config.streaming_host,
+        config.streaming_port,
+    )
+
+    pipeline = StreamingPipeline.from_config(config)
+
+    # Register new-service callback: trigger detector provisioning
+    def on_new_service(service: str):
+        logger.info("New service '%s' detected — triggering detector provisioning", service)
+        try:
+            from tools.provisioner import TOOL_FNS
+            result = TOOL_FNS["provision_detectors"](service=service)
+            logger.info("Provisioning result for %s: %s", service, result[:200])
+        except Exception as exc:
+            logger.error("Provisioning failed for %s: %s", service, exc)
+
+    pipeline.service_tracker.on_new_service(on_new_service)
+
+    start_receiver(pipeline, port=config.streaming_port, host=config.streaming_host)
+    logger.info(
+        "OTLP receiver ready. Configure gateway otlp/http exporter to "
+        "http://<agent-service>:%d",
+        config.streaming_port,
+    )
+
+    if args.streaming_only:
+        logger.info("Streaming-only mode — no batch assessments. Running until killed.")
+        while True:
+            time.sleep(3600)
+        return
+
+    # Streaming + batch: run assessments on schedule alongside the receiver
+    interval_minutes = args.interval if args.watch else 60
+    run_count = 0
+    logger.info("Batch assessments will run every %d minutes.", interval_minutes)
+
+    while True:
+        run_count += 1
+        logger.info("[Batch run %d] Starting assessment", run_count)
+        try:
+            output = agent(config, prompt=args.prompt)
+            # Seed service tracker with known services after each batch run
+            # so existing services don't trigger new-service callbacks
+            from agents.coordinator import _cross_domain_analysis
+        except Exception as exc:
+            logger.error("[Batch run %d] Failed: %s", run_count, exc)
+            output = f"[Assessment failed]: {exc}"
+
+        print(f"\n{'='*70}")
+        print(f"  BATCH ASSESSMENT  |  Run {run_count}")
+        print(f"{'='*70}\n")
+        print(output)
+        print(f"{'='*70}\n")
+
+        logger.info("[Batch run %d] Next run in %d minutes.", run_count, interval_minutes)
+        time.sleep(interval_minutes * 60)
 
 
 if __name__ == "__main__":
