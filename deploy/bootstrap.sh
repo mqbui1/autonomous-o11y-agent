@@ -63,6 +63,17 @@ echo "================================================================"
 echo ""
 echo "── Step 0: Install tools ────────────────────────────────────────────"
 
+# Wait for apt lock (unattended-upgrades holds it on fresh boot)
+echo "Waiting for apt lock to clear..."
+sudo systemctl stop unattended-upgrades 2>/dev/null || true
+for i in \$(seq 1 30); do
+  if ! sudo fuser /var/lib/dpkg/lock-frontend &>/dev/null; then break; fi
+  echo "  apt locked, waiting... (\$i/30)"
+  sleep 5
+done
+sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock 2>/dev/null || true
+sudo dpkg --configure -a 2>/dev/null || true
+
 # Docker
 if ! command -v docker &>/dev/null; then
   echo "Installing Docker..."
