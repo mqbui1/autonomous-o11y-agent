@@ -75,6 +75,20 @@ exporters:
     tls:
       insecure_skip_verify: false
 
+  # Secondary fan-out → O11y Agent streaming receiver
+  # Queued so agent latency never blocks the primary Splunk export path.
+  otlphttp/agent:
+    endpoint: "http://o11y-agent:4318"
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
 service:
   extensions: [health_check, http_forwarder, zpages]
 
@@ -82,7 +96,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
-      exporters: [otlphttp/traces, signalfx]
+      exporters: [otlphttp/traces, signalfx, otlphttp/agent]
 
     metrics:
       receivers: [otlp, redis]
@@ -92,4 +106,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
-      exporters: [splunk_hec/logs]
+      exporters: [splunk_hec/logs, otlphttp/agent]

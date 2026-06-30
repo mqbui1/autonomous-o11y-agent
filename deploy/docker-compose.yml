@@ -60,8 +60,10 @@ services:
 
   # ============================================================
   # AUTONOMOUS O11Y AGENT
-  # Runs continuous watch-mode assessments against the Splunk
-  # environment where the Astronomy Shop sends its telemetry.
+  # Streaming mode: OTLP receiver on :4318 accepts a secondary
+  # fan-out from the gateway collector for real-time detection
+  # (PII, attribute gaps, cardinality spikes, new services).
+  # Batch mode: runs a full 9-specialist assessment every WATCH_INTERVAL minutes.
   # ============================================================
   o11y-agent:
     build:
@@ -73,6 +75,8 @@ services:
       resources:
         limits:
           memory: 512M
+    ports:
+      - "4319:4318"    # OTLP receiver (4319 on host to avoid conflict with collector)
     environment:
       - SPLUNK_ACCESS_TOKEN
       - SPLUNK_REALM
@@ -89,6 +93,10 @@ services:
       # Agent behaviour
       - WATCH_INTERVAL=${WATCH_INTERVAL:-30}
       - AUTO_APPLY=${AUTO_APPLY:-false}
+      # Streaming receiver (collector fans out here)
+      - OTLP_RECEIVER_PORT=4318
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - ALERT_SUPPRESS=${ALERT_SUPPRESS:-}
     volumes:
       - agent-state:/home/agent/.o11y-agent
     depends_on:
