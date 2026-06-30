@@ -1,6 +1,6 @@
 # Autonomous O11y Agent
 
-Autonomous observability agent for Splunk Observability Cloud. Runs **five specialist AI agents** in parallel — health auditing, instrumentation analysis, cardinality governance, detector lifecycle, and log analysis — then synthesizes their findings into a prioritized assessment. Supports AWS Bedrock and any OpenAI-compatible LLM (Luna, Azure OpenAI, Ollama).
+Autonomous observability agent for Splunk Observability Cloud. Runs **seven specialist AI agents** in parallel — health auditing, instrumentation analysis, cardinality governance, detector lifecycle, log analysis, RUM/frontend monitoring, and root cause analysis — then synthesizes their findings into a prioritized assessment. Supports AWS Bedrock and any OpenAI-compatible LLM (Luna, Azure OpenAI, Ollama).
 
 ---
 
@@ -33,31 +33,39 @@ flowchart TD
     GOV["agents/governance.py\nGovernance Specialist"]
     DET["agents/detector.py\nDetector Specialist"]
     LOGS["agents/logs.py\nLog Specialist"]
+    RUM["agents/rum.py\nRUM Specialist"]
+    RCA["agents/rca.py\nRCA Specialist"]
 
-    SYNTH["_synthesize()\nSynthesis LLM Pass\nall 16 tools available for follow-up"]
+    SYNTH["_synthesize()\nSynthesis LLM Pass\nall tools available for follow-up"]
 
     T_HEALTH["tools/health_check.py\n• check_detector_health\n• check_apm_health\n• check_otel_collector_health\n• check_license_utilization"]
     T_INSTR["tools/analyzer.py\n• analyze_instrumentation"]
     T_GOV["tools/governance.py\n• full_cardinality_scan\n• fix_cardinality_report\n• drilldown_dimension\n• scan_trace_volume"]
     T_DET["tools/provisioner.py\n• provision_detectors\n• retune_detectors\n• audit_detectors"]
     T_LOGS["tools/log_analyzer.py\n• search_error_logs\n• analyze_log_patterns\n• get_log_volume"]
+    T_RUM["tools/rum_analyzer.py\n• list_rum_apps\n• get_rum_metrics\n• get_rum_errors"]
+    T_RCA["tools/rca_tools.py\n• get_active_incidents\n• search_error_traces\n• get_trace_analysis\n• get_service_topology\n• find_change_events\n• get_service_error_rate\n• get_service_latency\n• get_infra_metrics"]
 
     PROV["providers/\nLLMProvider ABC\nBedrockProvider\nOpenAICompatProvider\n(Luna · Azure · Ollama)"]
 
     CLI --> LOOP --> COORD
     COORD --> STATE_IN
-    STATE_IN -.->|trend context + actions_taken| HEALTH
-    STATE_IN -.->|trend context + actions_taken| INSTR
-    STATE_IN -.->|trend context + actions_taken| GOV
-    STATE_IN -.->|trend context + actions_taken| DET
-    STATE_IN -.->|trend context + actions_taken| LOGS
+    STATE_IN -.->|trend context| HEALTH
+    STATE_IN -.->|trend context| INSTR
+    STATE_IN -.->|trend context| GOV
+    STATE_IN -.->|trend context| DET
+    STATE_IN -.->|trend context| LOGS
+    STATE_IN -.->|trend context| RUM
+    STATE_IN -.->|trend context| RCA
 
-    subgraph parallel ["Parallel Execution — ThreadPoolExecutor x5 (900s timeout each)"]
+    subgraph parallel ["Parallel Execution — ThreadPoolExecutor x7 (900s timeout each)"]
         HEALTH
         INSTR
         GOV
         DET
         LOGS
+        RUM
+        RCA
     end
 
     HEALTH --> PROV
@@ -65,18 +73,24 @@ flowchart TD
     GOV --> PROV
     DET --> PROV
     LOGS --> PROV
+    RUM --> PROV
+    RCA --> PROV
 
     PROV -->|tool_use| T_HEALTH
     PROV -->|tool_use| T_INSTR
     PROV -->|tool_use| T_GOV
     PROV -->|tool_use| T_DET
     PROV -->|tool_use| T_LOGS
+    PROV -->|tool_use| T_RUM
+    PROV -->|tool_use| T_RCA
 
     HEALTH -->|SpecialistFindings| COORD
     INSTR -->|SpecialistFindings| COORD
     GOV -->|SpecialistFindings| COORD
     DET -->|SpecialistFindings| COORD
     LOGS -->|SpecialistFindings| COORD
+    RUM -->|SpecialistFindings| COORD
+    RCA -->|SpecialistFindings| COORD
 
     COORD --> SYNTH --> STATE_OUT
     LOOP --> MON
@@ -117,7 +131,7 @@ flowchart TD
     SVC --> PROV
 
     DISP --> OBS
-    OBS -.->|summarize()| BATCH
+    OBS -.->|"summarize()"| BATCH
 
     subgraph agent ["O11y Agent Pod (always-on Deployment)"]
         RECV
@@ -138,11 +152,11 @@ flowchart TD
 | Layer | File(s) | Responsibility |
 |---|---|---|
 | **Entrypoint** | `main.py`, `loop.py` | CLI arg parsing, batch/streaming mode, watch loop, approval integration |
-| **Coordinator** | `agents/coordinator.py` | Parallel 5-specialist dispatch, cross-domain analysis, synthesis, state |
+| **Coordinator** | `agents/coordinator.py` | Parallel 7-specialist dispatch, cross-domain analysis, synthesis, state, `run_incident_rca()` |
 | **Agent Loop** | `agent_loop.py` | Provider-agnostic tool-calling loop; concurrent tool execution per turn |
 | **LLM Providers** | `providers/bedrock.py`<br>`providers/openai_compat.py` | Bedrock (default) + any OpenAI-compatible endpoint (Luna, Azure, Ollama) |
-| **Specialists** | `agents/health.py`<br>`agents/instrumentation.py`<br>`agents/governance.py`<br>`agents/detector.py`<br>`agents/logs.py` | Domain-scoped LLM reasoning + structured `SpecialistFindings` output |
-| **Tools** | `tools/health_check.py`<br>`tools/analyzer.py`<br>`tools/governance.py`<br>`tools/provisioner.py`<br>`tools/log_analyzer.py` | Subprocess wrappers (health/instr/gov/detector) + direct Splunk REST API (logs) |
+| **Specialists** | `agents/health.py`<br>`agents/instrumentation.py`<br>`agents/governance.py`<br>`agents/detector.py`<br>`agents/logs.py`<br>`agents/rum.py`<br>`agents/rca.py` | Domain-scoped LLM reasoning + structured `SpecialistFindings` output |
+| **Tools** | `tools/health_check.py`<br>`tools/analyzer.py`<br>`tools/governance.py`<br>`tools/provisioner.py`<br>`tools/log_analyzer.py`<br>`tools/rum_analyzer.py`<br>`tools/rca_tools.py` | Subprocess wrappers (health/instr/gov/detector) + direct Splunk REST/SignalFlow/GraphQL APIs (logs, RUM, RCA) |
 | **Findings** | `tools/findings.py` | `SpecialistFindings` + `Issue` dataclasses; `SUBMIT_SCHEMA`; `actions_taken` audit trail |
 | **OTLP Receiver** | `receiver/otlp_receiver.py` | Flask app receiving gateway-fanned traces/metrics; JSON only — warns on protobuf |
 | **Streaming Pipeline** | `streaming/pipeline.py` | Fan-out orchestrator; mirrors alerts into `ObservationBuffer` |
@@ -162,8 +176,8 @@ flowchart TD
 
 ## Key Design Decisions
 
-**1. Five specialists, two levels of parallelism**
-- The coordinator launches all 5 specialists simultaneously via `ThreadPoolExecutor(max_workers=5)`
+**1. Seven specialists, two levels of parallelism**
+- The coordinator launches all 7 specialists simultaneously via `ThreadPoolExecutor(max_workers=7)`
 - Within each specialist, when the LLM returns multiple `tool_use` blocks in one turn, all tools execute concurrently — eliminating sequential bottlenecks inside a single agent turn
 - Each specialist has a 900s wall-clock timeout (`SPECIALIST_TIMEOUT`) so a stuck call can never hang the full run
 
@@ -173,8 +187,8 @@ flowchart TD
 - Cross-domain analysis and state persistence work from structured fields — no regex extraction
 
 **3. Synthesis with full tool access**
-- The final synthesis LLM pass receives all 16 tools (from all 5 specialists) for targeted follow-up
-- Cross-domain analysis (service/issue mapping across all 5 findings) is pre-computed and injected into the synthesis prompt
+- The final synthesis LLM pass receives all tools (from all 7 specialists) for targeted follow-up
+- Cross-domain analysis (service/issue mapping across all 7 findings) is pre-computed and injected into the synthesis prompt
 
 **4. Streaming and batch share context via ObservationBuffer**
 - The streaming pipeline writes every PII hit, new service, cardinality spike, and attribute gap into a 2h `ObservationBuffer`
@@ -466,13 +480,32 @@ The agent emits spans (`o11y_agent.assessment`, `o11y_agent.specialist_run`) and
 - Auto-detects GenAI/agentic services and applies specialized detector templates
 - Populates `actions_taken` with every detector deployed or retuned (audit trail)
 
-### Log Specialist _(new)_
+### Log Specialist
 - Searches for ERROR/CRITICAL log entries across all services
 - Groups log messages by fingerprint to surface top recurring error patterns
 - Identifies services with zero log output (complete logging gap)
 - Flags log volume anomalies: services generating disproportionate log traffic
 - Correlates log error counts with APM error rates to distinguish instrumentation gaps from real failures
 - Uses Splunk Observability REST API directly — no subprocess dependency
+
+### RUM Specialist
+- Discovers which frontend applications are instrumented with Splunk RUM
+- Assesses session volume, JavaScript error rates, and Core Web Vitals (LCP, FID, CLS) per app
+- Surfaces unconfigured frontends — services expected to have RUM but reporting no data
+- Identifies high JS error rates, poor Core Web Vitals thresholds, and top recurring error types
+- Distinguishes instrumentation gaps (RUM not configured) from real UX degradation
+- Uses SignalFlow to query `rum.*` metrics from the Splunk Observability streaming API
+
+### RCA Specialist
+- **Reactive investigator** — discovers active incidents and performs end-to-end root cause analysis
+- Searches for error traces around the incident start time using APM GraphQL async search
+- Analyzes `topLatencyContributors` per trace to pinpoint the exact service/operation causing slowness
+- Maps the full service dependency graph to assess blast radius (upstream callers + downstream deps)
+- Correlates deployment/change events in the 90-minute window before the incident (deployment-triggered regressions)
+- Queries error rate and p99 latency time series to establish the precise incident timeline
+- Checks Kubernetes pod CPU and memory metrics for resource exhaustion as a potential cause
+- Produces a **causal chain** conclusion with confidence level: `HIGH` (clear evidence), `MEDIUM` (correlated), or `LOW` (insufficient data)
+- Can also be triggered directly from streaming alerts via `coordinator.run_incident_rca(config, service, incident_id, start_ms)`
 
 ---
 
@@ -494,19 +527,23 @@ autonomous-o11y-agent/
 │   └── openai_compat.py       # OpenAI-compatible (Luna · Azure · Vertex · Ollama)
 │
 ├── agents/
-│   ├── coordinator.py         # 5-specialist parallel dispatch, cross-domain analysis, synthesis
+│   ├── coordinator.py         # 7-specialist parallel dispatch, cross-domain analysis, synthesis, run_incident_rca()
 │   ├── health.py              # Health specialist → SpecialistFindings
 │   ├── instrumentation.py     # Instrumentation specialist → SpecialistFindings
 │   ├── governance.py          # Governance specialist → SpecialistFindings
 │   ├── detector.py            # Detector specialist → SpecialistFindings + actions_taken
-│   └── logs.py                # Log specialist → SpecialistFindings  (new)
+│   ├── logs.py                # Log specialist → SpecialistFindings
+│   ├── rum.py                 # RUM specialist → SpecialistFindings (Core Web Vitals, JS errors)
+│   └── rca.py                 # RCA specialist → causal chain + SpecialistFindings
 │
 ├── tools/
 │   ├── health_check.py        # Wraps splunk-o11y-health-check
 │   ├── analyzer.py            # Wraps o11y-instrumentation-analyzer
 │   ├── governance.py          # Wraps o11y-usage-governance + full_cardinality_scan
 │   ├── provisioner.py         # Wraps auto-detector-provisioner
-│   ├── log_analyzer.py        # Direct Splunk REST API: error logs, patterns, volume  (new)
+│   ├── log_analyzer.py        # Direct Splunk REST API: error logs, patterns, volume
+│   ├── rum_analyzer.py        # SignalFlow: rum.* metrics, Core Web Vitals, JS error rates
+│   ├── rca_tools.py           # APM GraphQL + SignalFlow + REST: incidents, traces, topology, change events
 │   ├── findings.py            # SpecialistFindings · Issue · SUBMIT_SCHEMA · actions_taken
 │   └── _runner.py             # Shared subprocess runner + batch_run() parallel exec
 │
