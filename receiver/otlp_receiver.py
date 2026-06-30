@@ -70,15 +70,29 @@ def create_app(pipeline: "StreamingPipeline") -> Flask:
             mimetype="application/json",
         )
 
-    @app.get("/v1/logs")
     @app.post("/v1/logs")
     def receive_logs():
-        # Accept but don't process logs — avoids 404 errors in gateway
+        payload = _parse_body()
+        if payload is None:
+            return Response("Bad Request", status=400)
+
+        resource_logs = payload.get("resourceLogs", [])
+        if resource_logs:
+            try:
+                pipeline.process_resource_logs(resource_logs)
+            except Exception as exc:
+                logger.error("Error processing logs: %s", exc, exc_info=True)
+
         return Response(
             json.dumps({"partialSuccess": {}}),
             status=200,
             mimetype="application/json",
         )
+
+    @app.get("/v1/logs")
+    def receive_logs_get():
+        # Some collectors do a GET probe — return 200 to avoid 404 noise
+        return Response(json.dumps({"partialSuccess": {}}), status=200, mimetype="application/json")
 
     @app.get("/status")
     def status():

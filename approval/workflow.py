@@ -111,17 +111,41 @@ class ApprovalWorkflow:
         return applied
 
 
+def _get_tool_registry() -> dict:
+    """Lazily load all tool functions for apply_fn reconnection."""
+    try:
+        from tools.provisioner import TOOL_FNS as P
+        from tools.governance import TOOL_FNS as G
+        from tools.health_check import TOOL_FNS as H
+        from tools.analyzer import TOOL_FNS as A
+        from tools.log_analyzer import TOOL_FNS as L
+        from tools.rum_analyzer import TOOL_FNS as R
+        from tools.dashboard import TOOL_FNS as D
+        return {**P, **G, **H, **A, **L, **R, **D}
+    except Exception as exc:
+        logger.warning("Tool registry load failed: %s", exc)
+        return {}
+
+
 def _extract_actions(findings: dict) -> list[PendingAction]:
     """Extract HIGH and CRITICAL issues as pending actions from specialist findings."""
     actions = []
     idx = 0
-    domain_order = ["health", "instrumentation", "governance", "detector", "logs"]
+    tool_registry = _get_tool_registry()
+    domain_order = ["health", "instrumentation", "governance", "detector", "logs", "rum"]
     for domain in domain_order:
         f = findings.get(domain)
         if not f or not hasattr(f, "issues"):
             continue
         for issue in f.issues:
             if issue.severity in ("critical", "high"):
+                # Reconnect apply_fn from action_tool + action_args if available
+                apply_fn = None
+                if getattr(issue, "action_tool", "") and issue.action_tool in tool_registry:
+                    fn = tool_registry[issue.action_tool]
+                    args = dict(getattr(issue, "action_args", {}) or {})
+                    apply_fn = lambda f=fn, a=args: f(**a)
+
                 actions.append(PendingAction(
                     index=idx,
                     domain=domain,
@@ -129,6 +153,7 @@ def _extract_actions(findings: dict) -> list[PendingAction]:
                     service=issue.service or "",
                     description=issue.description,
                     recommendation=issue.recommendation,
+                    apply_fn=apply_fn,
                 ))
                 idx += 1
     return actions

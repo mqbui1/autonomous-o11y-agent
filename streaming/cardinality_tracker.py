@@ -63,10 +63,15 @@ class CardinalityTracker:
         with self._lock:
             window = self._windows[metric_name]
             window.append((now, combo))
-            # Prune expired
-            self._windows[metric_name] = [(t, c) for t, c in window if t > cutoff]
+            # Prune expired entries
+            pruned = [(t, c) for t, c in window if t > cutoff]
+            self._windows[metric_name] = pruned
+            # If the window just emptied, evict dimension tracking too (prevents memory leak)
+            if not pruned:
+                self._dim_keys.pop(metric_name, None)
+                return
             # Count unique combos
-            unique_combos = {c for _, c in self._windows[metric_name]}
+            unique_combos = {c for _, c in pruned}
             unique_count = len(unique_combos)
 
             # Track per-dimension key frequency for blast-radius analysis

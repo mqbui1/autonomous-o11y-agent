@@ -19,6 +19,9 @@ class Issue:
     description: str
     recommendation: str
     service: str = ""
+    # Optional: tool function name + args for the approval workflow to auto-apply
+    action_tool: str = ""
+    action_args: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -87,6 +90,14 @@ SUBMIT_SCHEMA = {
                                 },
                                 "description": {"type": "string"},
                                 "recommendation": {"type": "string"},
+                                "action_tool": {
+                                    "type": "string",
+                                    "description": "Tool function name to auto-apply this fix (e.g. 'provision_detectors'). Leave empty for manual-only actions.",
+                                },
+                                "action_args": {
+                                    "type": "object",
+                                    "description": "Keyword arguments for action_tool (e.g. {\"service\": \"frontend\", \"auto_deploy\": true}).",
+                                },
                             },
                         },
                     },
@@ -132,9 +143,14 @@ def make_submit_fn(collector: dict, domain: str):
         metrics: dict = None,
         actions_taken: list = None,
     ) -> str:
-        parsed_issues = [
-            Issue(**i) if isinstance(i, dict) else i for i in (issues or [])
-        ]
+        parsed_issues = []
+        for i in (issues or []):
+            if isinstance(i, dict):
+                # Strip unknown keys so Issue() doesn't choke on extra fields
+                known = {f.name for f in Issue.__dataclass_fields__.values()}
+                parsed_issues.append(Issue(**{k: v for k, v in i.items() if k in known}))
+            else:
+                parsed_issues.append(i)
         collector[domain] = SpecialistFindings(
             domain=domain,
             summary=summary,

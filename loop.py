@@ -14,19 +14,10 @@ def run_once(agent, config, prompt: str = None, monitor=None) -> str:
     """Run a single assessment with optional self-monitoring."""
     from observability.self_monitor import SelfMonitor
     mon = monitor or SelfMonitor.noop()
-    start = time.time()
     try:
         with mon.assessment_span(config.environment, config.auto_apply):
-            result = agent(config, prompt=prompt)
-        elapsed = time.time() - start
-        # Record metrics from last state snapshot (findings not directly returned)
-        try:
-            from state import load_state
-            state = load_state(config.environment)
-            if state.runs:
-                mon.record_run_metrics({}, elapsed, config.environment)
-        except Exception:
-            pass
+            # Pass monitor directly so coordinator records metrics with real findings
+            result = agent(config, prompt=prompt, monitor=mon)
         return result
     except Exception as e:
         logger.error("Assessment run failed: %s", e, exc_info=True)

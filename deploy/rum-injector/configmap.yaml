@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rum-injector-config
+  namespace: astronomy-shop
+data:
+  nginx.conf: |
+    worker_processes 1;
+    events { worker_connections 1024; }
+    http {
+      server {
+        listen 8081;
+
+        # Proxy all traffic to the astronomy shop frontendproxy
+        location / {
+          proxy_pass http://astronomy-shop-frontendproxy.astronomy-shop.svc.cluster.local:8080;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+          # Inject Splunk RUM script into every HTML response
+          sub_filter_types text/html;
+          sub_filter '</head>' '
+            <script src="https://cdn.signalfx.com/o11y-gdi-rum/latest/splunk-otel-web.js" crossorigin="anonymous"></script>
+            <script>
+              SplunkRum.init({
+                beaconUrl: "https://rum-ingest.RUM_REALM.signalfx.com/v1/rum",
+                rumAuth: "RUM_AUTH_TOKEN",
+                app: "astronomy-shop",
+                version: "1.0",
+                environment: "astronomy-shop-demo",
+                allowInsecureBeacon: false,
+                debug: false
+              });
+            </script>
+          </head>';
+          sub_filter_once on;
+        }
+      }
+    }
