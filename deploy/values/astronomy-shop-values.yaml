@@ -11,6 +11,19 @@ grafana:
 opensearch:
   enabled: false
 
+# Disable optional services to reduce pod count (fewer simultaneous container starts)
+components:
+  flagd:
+    enabled: false
+  accounting:
+    enabled: false
+  fraud-detection:
+    enabled: false
+  image-provider:
+    enabled: false
+  product-reviews:
+    enabled: false
+
 # Configure the built-in OTel Collector to export to the Splunk gateway
 opentelemetry-collector:
   config:
