@@ -1,19 +1,17 @@
 # Autonomous O11y Agent
 
-Autonomous observability agent for Splunk Observability Cloud. Runs four specialist AI agents in parallel — health auditing, instrumentation analysis, cardinality governance, and detector lifecycle — then synthesizes their findings into a prioritized assessment using Claude via AWS Bedrock.
+Autonomous observability agent for Splunk Observability Cloud. Runs **five specialist AI agents** in parallel — health auditing, instrumentation analysis, cardinality governance, detector lifecycle, and log analysis — then synthesizes their findings into a prioritized assessment. Supports AWS Bedrock and any OpenAI-compatible LLM (Luna, Azure OpenAI, Ollama).
 
 ---
 
 ## Deployment Modes
-
-The agent supports two deployment modes depending on your use case:
 
 | Mode | How | Best for |
 |---|---|---|
 | **Batch** | CronJob (or local cron) | Periodic deep assessments — no persistent pod required |
 | **Streaming** | Always-on Deployment + OTLP/HTTP receiver | Real-time PII detection, attribute validation, cardinality alerts as telemetry flows through |
 
-In **streaming mode**, the agent co-deploys alongside your OTel Collector **gateway** node. The gateway fans a copy of all traces and metrics to the agent's OTLP/HTTP receiver (port 4318) via a secondary exporter configured with `retry_on_failure: false` — so the agent is never on the critical path for the primary Splunk export.
+In **streaming mode**, the agent co-deploys alongside your OTel Collector **gateway** node. The gateway fans a copy of all traces and metrics to the agent's OTLP/HTTP receiver (port 4318) via a secondary exporter with `retry_on_failure: false` — the agent is never on the critical path for the primary Splunk export.
 
 ---
 
@@ -24,65 +22,64 @@ In **streaming mode**, the agent co-deploys alongside your OTel Collector **gate
 ```mermaid
 flowchart TD
     CLI["main.py\nCLI Entrypoint"]
-    LOOP["loop.py\nrun_once / watch"]
+    LOOP["loop.py\nrun_once / watch\n+ approval workflow"]
     COORD["agents/coordinator.py\nCoordinator"]
     STATE_IN["state.py\nLoad prior run state\n~/.o11y-agent/{env}.json"]
-    STATE_OUT["state.py\nSave new run record"]
+    STATE_OUT["state.py\nSave RunRecord\nactive/silent names · actions_taken\ndetector IDs · critical issues"]
+    MON["observability/self_monitor.py\nSelf-Observability\nrun duration · issues found\ninstrumentation score"]
 
     HEALTH["agents/health.py\nHealth Specialist"]
     INSTR["agents/instrumentation.py\nInstrumentation Specialist"]
     GOV["agents/governance.py\nGovernance Specialist"]
     DET["agents/detector.py\nDetector Specialist"]
+    LOGS["agents/logs.py\nLog Specialist"]
 
-    SYNTH["_synthesize()\nSynthesis LLM Pass\nall 13 tools available for follow-up"]
+    SYNTH["_synthesize()\nSynthesis LLM Pass\nall 16 tools available for follow-up"]
 
     T_HEALTH["tools/health_check.py\n• check_detector_health\n• check_apm_health\n• check_otel_collector_health\n• check_license_utilization"]
     T_INSTR["tools/analyzer.py\n• analyze_instrumentation"]
     T_GOV["tools/governance.py\n• full_cardinality_scan\n• fix_cardinality_report\n• drilldown_dimension\n• scan_trace_volume"]
     T_DET["tools/provisioner.py\n• provision_detectors\n• retune_detectors\n• audit_detectors"]
+    T_LOGS["tools/log_analyzer.py\n• search_error_logs\n• analyze_log_patterns\n• get_log_volume"]
 
-    LOOP_CORE["agent_loop.py\nBedrock Converse API Loop\nParallel tool execution per turn"]
-
-    EXT1["splunk-o11y-health-check\n(subprocess)"]
-    EXT2["o11y-instrumentation-analyzer\n(subprocess)"]
-    EXT3["o11y-usage-governance\n(subprocess)"]
-    EXT4["auto-detector-provisioner\n(subprocess)"]
+    PROV["providers/\nLLMProvider ABC\nBedrockProvider\nOpenAICompatProvider\n(Luna · Azure · Ollama)"]
 
     CLI --> LOOP --> COORD
     COORD --> STATE_IN
-    STATE_IN -.->|trend context injected| HEALTH
-    STATE_IN -.->|trend context injected| INSTR
-    STATE_IN -.->|trend context injected| GOV
-    STATE_IN -.->|trend context injected| DET
+    STATE_IN -.->|trend context + actions_taken| HEALTH
+    STATE_IN -.->|trend context + actions_taken| INSTR
+    STATE_IN -.->|trend context + actions_taken| GOV
+    STATE_IN -.->|trend context + actions_taken| DET
+    STATE_IN -.->|trend context + actions_taken| LOGS
 
-    subgraph parallel ["Parallel Execution — ThreadPoolExecutor x4"]
+    subgraph parallel ["Parallel Execution — ThreadPoolExecutor x5 (900s timeout each)"]
         HEALTH
         INSTR
         GOV
         DET
+        LOGS
     end
 
-    HEALTH --> LOOP_CORE
-    INSTR --> LOOP_CORE
-    GOV --> LOOP_CORE
-    DET --> LOOP_CORE
+    HEALTH --> PROV
+    INSTR --> PROV
+    GOV --> PROV
+    DET --> PROV
+    LOGS --> PROV
 
-    LOOP_CORE -->|tool_use| T_HEALTH
-    LOOP_CORE -->|tool_use| T_INSTR
-    LOOP_CORE -->|tool_use| T_GOV
-    LOOP_CORE -->|tool_use| T_DET
-
-    T_HEALTH --> EXT1
-    T_INSTR --> EXT2
-    T_GOV --> EXT3
-    T_DET --> EXT4
+    PROV -->|tool_use| T_HEALTH
+    PROV -->|tool_use| T_INSTR
+    PROV -->|tool_use| T_GOV
+    PROV -->|tool_use| T_DET
+    PROV -->|tool_use| T_LOGS
 
     HEALTH -->|SpecialistFindings| COORD
     INSTR -->|SpecialistFindings| COORD
     GOV -->|SpecialistFindings| COORD
     DET -->|SpecialistFindings| COORD
+    LOGS -->|SpecialistFindings| COORD
 
     COORD --> SYNTH --> STATE_OUT
+    LOOP --> MON
 ```
 
 ### Streaming Mode (Gateway Co-Deployment)
@@ -91,21 +88,22 @@ flowchart TD
 flowchart TD
     GW["OTel Collector Gateway\nsplunk-otel-collector"]
     SPLUNK["Splunk Observability Cloud\nprimary export path"]
-    RECV["receiver/otlp_receiver.py\nFlask OTLP/HTTP :4318\n/v1/traces  /v1/metrics\n/healthz  /status"]
+    RECV["receiver/otlp_receiver.py\nFlask OTLP/HTTP :4318\nencoding: json REQUIRED\n/v1/traces  /v1/metrics\n/healthz  /status"]
     PIPE["streaming/pipeline.py\nStreamingPipeline\nfan-out orchestrator"]
 
     PII["streaming/pii_scanner.py\nPII / PCI Scanner\ncard numbers, SSN, email\nCRITICAL alert on match"]
     ATTR["streaming/attribute_checker.py\nAttribute Checker\ndeployment.environment\nhost.name · k8s.pod.name"]
     CARD["streaming/cardinality_tracker.py\nCardinality Tracker\nsliding-window unique combos\nwarn@10K · critical@50K"]
-    SVC["streaming/service_tracker.py\nService Tracker\nnew service.name detected\ntriggers provisioning callback"]
+    SVC["streaming/service_tracker.py\nService Tracker\nseeded from state on startup\nnew service.name → provisioning"]
 
     DISP["streaming/alerts.py\nAlertDispatcher\ndedup + cooldown window\nstdout + optional webhook"]
+    OBS["streaming/observations.py\nObservationBuffer\n2h sliding window\nshared with batch assessment"]
 
     PROV["Provisioning Callback\nauto-provision detectors\nfor new services"]
-    BATCH["Scheduled Batch Assessment\nruns every N minutes\nfull 4-specialist analysis"]
+    BATCH["Scheduled Batch Assessment\nruns every N minutes\ninjects ObservationBuffer context\ninto specialist prompts"]
 
     GW -->|primary| SPLUNK
-    GW -->|fanout copy\nretry_on_failure=false| RECV
+    GW -->|fanout copy\nencoding=json\nretry_on_failure=false| RECV
     RECV --> PIPE
 
     PIPE --> PII
@@ -118,7 +116,8 @@ flowchart TD
     CARD --> DISP
     SVC --> PROV
 
-    DISP -->|webhook| SPLUNK
+    DISP --> OBS
+    OBS -.->|summarize()| BATCH
 
     subgraph agent ["O11y Agent Pod (always-on Deployment)"]
         RECV
@@ -128,6 +127,7 @@ flowchart TD
         CARD
         SVC
         DISP
+        OBS
         PROV
         BATCH
     end
@@ -137,63 +137,85 @@ flowchart TD
 
 | Layer | File(s) | Responsibility |
 |---|---|---|
-| **Entrypoint** | `main.py`, `loop.py` | CLI arg parsing, batch/streaming mode, watch loop |
-| **Coordinator** | `agents/coordinator.py` | Parallel specialist dispatch, cross-domain analysis, synthesis, state |
-| **Agent Loop** | `agent_loop.py` | Bedrock Converse API tool-calling loop; concurrent tool execution per turn |
-| **Specialists** | `agents/health.py`<br>`agents/instrumentation.py`<br>`agents/governance.py`<br>`agents/detector.py` | Domain-scoped LLM reasoning + structured `SpecialistFindings` output |
-| **Tools** | `tools/health_check.py`<br>`tools/analyzer.py`<br>`tools/governance.py`<br>`tools/provisioner.py` | Subprocess wrappers around sibling CLI projects |
-| **OTLP Receiver** | `receiver/otlp_receiver.py` | Flask app receiving gateway-fanned traces/metrics; starts in daemon thread |
-| **Streaming Pipeline** | `streaming/pipeline.py` | Fan-out orchestrator — routes spans/metrics to all 4 real-time detectors |
+| **Entrypoint** | `main.py`, `loop.py` | CLI arg parsing, batch/streaming mode, watch loop, approval integration |
+| **Coordinator** | `agents/coordinator.py` | Parallel 5-specialist dispatch, cross-domain analysis, synthesis, state |
+| **Agent Loop** | `agent_loop.py` | Provider-agnostic tool-calling loop; concurrent tool execution per turn |
+| **LLM Providers** | `providers/bedrock.py`<br>`providers/openai_compat.py` | Bedrock (default) + any OpenAI-compatible endpoint (Luna, Azure, Ollama) |
+| **Specialists** | `agents/health.py`<br>`agents/instrumentation.py`<br>`agents/governance.py`<br>`agents/detector.py`<br>`agents/logs.py` | Domain-scoped LLM reasoning + structured `SpecialistFindings` output |
+| **Tools** | `tools/health_check.py`<br>`tools/analyzer.py`<br>`tools/governance.py`<br>`tools/provisioner.py`<br>`tools/log_analyzer.py` | Subprocess wrappers (health/instr/gov/detector) + direct Splunk REST API (logs) |
+| **Findings** | `tools/findings.py` | `SpecialistFindings` + `Issue` dataclasses; `SUBMIT_SCHEMA`; `actions_taken` audit trail |
+| **OTLP Receiver** | `receiver/otlp_receiver.py` | Flask app receiving gateway-fanned traces/metrics; JSON only — warns on protobuf |
+| **Streaming Pipeline** | `streaming/pipeline.py` | Fan-out orchestrator; mirrors alerts into `ObservationBuffer` |
+| **Observation Buffer** | `streaming/observations.py` | 2h sliding-window buffer shared between streaming detectors and batch assessments |
 | **PII Scanner** | `streaming/pii_scanner.py` | Regex scan of span attributes for PCI card numbers, SSN, email, phone |
 | **Attribute Checker** | `streaming/attribute_checker.py` | Validates required OTel attributes on every span/metric data point |
-| **Cardinality Tracker** | `streaming/cardinality_tracker.py` | Sliding-window unique-combination counter; generates drop YAML on breach |
-| **Service Tracker** | `streaming/service_tracker.py` | Fires provisioning callback on first appearance of a new `service.name` |
+| **Cardinality Tracker** | `streaming/cardinality_tracker.py` | Sliding-window unique-combo counter; generates drop YAML on breach |
+| **Service Tracker** | `streaming/service_tracker.py` | Seeded from state on startup; fires provisioning callback on new `service.name` |
 | **Alerts** | `streaming/alerts.py` | Thread-safe alert dispatcher: dedup by key+cooldown, stdout + webhook |
-| **State** | `state.py` | `RunRecord` with silent services, deployed detector IDs, trend context |
-| **Config** | `config.py` | `AgentConfig` dataclass; realm, token, environment, streaming, alerts |
+| **Approval Workflow** | `approval/workflow.py` | Human-in-the-loop review of HIGH/CRITICAL actions: interactive, webhook, or auto |
+| **State** | `state.py` | `RunRecord` with `active_service_names`, `silent_service_names`, `actions_taken`, trend context |
+| **Config** | `config.py` | `AgentConfig` dataclass; realm, token, environment, provider, streaming, alerts, timeouts |
+| **Self-Monitor** | `observability/self_monitor.py` | OTel SDK instrumentation of agent's own operations; emits spans + metrics |
 | **Helm Chart** | `charts/o11y-agent/` | `mode.type: streaming` → Deployment; `mode.type: batch` → CronJob |
 
-### Key Design Decisions
+---
 
-**1. Two levels of parallelism**
-- The coordinator launches all 4 specialists simultaneously via `ThreadPoolExecutor(max_workers=4)`
-- Within each specialist, when Claude returns multiple `tool_use` blocks in one turn, all tools execute concurrently — eliminating sequential bottlenecks inside a single agent turn
+## Key Design Decisions
+
+**1. Five specialists, two levels of parallelism**
+- The coordinator launches all 5 specialists simultaneously via `ThreadPoolExecutor(max_workers=5)`
+- Within each specialist, when the LLM returns multiple `tool_use` blocks in one turn, all tools execute concurrently — eliminating sequential bottlenecks inside a single agent turn
+- Each specialist has a 900s wall-clock timeout (`SPECIALIST_TIMEOUT`) so a stuck call can never hang the full run
 
 **2. Structured output from every specialist**
-- Each specialist returns a typed `SpecialistFindings` dataclass (not freeform text)
-- Contains: `services_active`, `services_silent`, `instrumentation_score`, `issues[]`, `metrics{}`
-- Coordinator's cross-domain analysis and state persistence work from structured fields — no regex extraction
+- Each specialist returns a typed `SpecialistFindings` dataclass — not freeform text
+- Fields: `services_active[]`, `services_silent[]`, `instrumentation_score`, `issues[]`, `metrics{}`, `actions_taken[]`
+- Cross-domain analysis and state persistence work from structured fields — no regex extraction
 
 **3. Synthesis with full tool access**
-- The final synthesis LLM pass receives all 13 tools (from all 4 specialists) for targeted follow-up
-- Can query any domain to verify a cross-cutting finding before writing the report
-- Cross-domain analysis (service/issue mapping across all 4 findings) is pre-computed and injected into the synthesis prompt
+- The final synthesis LLM pass receives all 16 tools (from all 5 specialists) for targeted follow-up
+- Cross-domain analysis (service/issue mapping across all 5 findings) is pre-computed and injected into the synthesis prompt
 
-**4. Persistent memory and trend detection**
-- Each run records: instrumentation score, active/silent service names, deployed detector IDs, critical issues
-- `trend_context()` explicitly surfaces: previously silent services (verify if now active), detectors deployed last run (verify still present), consecutive silence for 2+ runs
+**4. Streaming and batch share context via ObservationBuffer**
+- The streaming pipeline writes every PII hit, new service, cardinality spike, and attribute gap into a 2h `ObservationBuffer`
+- When a scheduled batch assessment runs, `ObservationBuffer.summarize()` is injected into each specialist's trend context
+- Specialists see "3 new services appeared in the last hour, PII detected in payment-service at 14:32" alongside their API-sourced findings
+
+**5. Persistent memory and audit trail**
+- Each run records: active/silent service names, deployed detector IDs, critical issues, and `actions_taken` (what was actually changed)
+- `trend_context()` surfaces prior silent services, deployed detectors, and prior actions for verification on the next run
+- Consecutive silence detection: services silent for 2+ runs are flagged as likely instrumentation failures
 - Stored at `~/.o11y-agent/{environment}.json`, capped at 30 runs per environment
 
-**5. Environment scoping at two layers**
-- Hard filter in tool wrappers removes off-environment data before it reaches the LLM
-- System prompts explicitly restrict each specialist to the target environment only
-- Prevents org-wide noise (other teams' services, other environments) from polluting findings
+**6. Multi-provider LLM support**
+- `providers/` module abstracts the LLM call behind a `LLMProvider` interface
+- `BedrockProvider`: default, uses `boto3` Converse API
+- `OpenAICompatProvider`: any OpenAI Chat Completions endpoint — Galileo Luna, Azure OpenAI, Google Vertex, Ollama
+- Schema conversion is automatic: internal Bedrock `toolSpec` format is converted to OpenAI function format on the fly
+- Switch with `LLM_PROVIDER=openai OPENAI_BASE_URL=http://localhost:8080/v1`
 
-**6. Gateway co-deployment — agent never on critical path**
-- Gateway adds a secondary `otlp/o11y_agent` exporter with `retry_on_failure: false` and `timeout: 5s`
-- If the agent pod is unavailable, the gateway drops the copy silently — primary Splunk export is unaffected
-- The `gateway-patch-configmap.yaml` Helm template renders a ready-to-use `values.yaml` fragment that ops can apply to their existing `splunk-otel-collector` release with a single `helm upgrade`
+**7. Human-in-the-loop approval workflow**
+- In dry-run mode (`auto_apply=False`), HIGH and CRITICAL issues are extracted as numbered `PendingAction` items
+- Three approval modes: **interactive** (stdin prompt), **webhook** (POST `{"approved": [1,3]}` to `APPROVAL_WEBHOOK_URL`), **auto** (non-interactive environments)
+- Applied actions are logged back into `RunRecord.actions_taken` for the audit trail
 
-**7. No agent framework dependency**
-- Pure `boto3` Converse API — no Strands, LangChain, or other framework overhead
-- The entire tool-calling loop is ~50 lines in `agent_loop.py`
-- Bedrock config: `read_timeout=600` to handle long-running provisioner and synthesis calls
+**8. Gateway co-deployment — agent never on critical path**
+- Gateway adds a secondary `otlp/o11y_agent` exporter with `encoding: json`, `retry_on_failure: false`, `timeout: 5s`
+- The receiver emits a once-per-process warning with fix instructions if it receives protobuf payloads
+- `ServiceTracker` is seeded from state on every pod restart — existing services never trigger provisioning callbacks
+
+**9. Agent self-observability**
+- `observability/self_monitor.py` wraps every run with OTel spans and emits four metrics:
+  - `o11y_agent.run.duration` (histogram), `o11y_agent.issues.found` (counter by severity)
+  - `o11y_agent.instrumentation_score` (gauge), `o11y_agent.silent_services` (gauge)
+- Zero overhead when OTel SDK is not installed — graceful no-op
+- Activated by `OTEL_EXPORTER_OTLP_ENDPOINT`; build dashboards and detectors on the agent itself
 
 ---
 
 ## Prerequisites
 
-The four tool projects must be cloned as siblings to this repo:
+The tool projects must be cloned as siblings to this repo:
 
 ```
 Documents/
@@ -217,10 +239,23 @@ pip install -r ../splunk-o11y-health-check/requirements-health-hub.txt
 
 ```bash
 cd autonomous-o11y-agent
+
+# Core install (Bedrock only)
 pip install -e .
+
+# With OpenAI-compatible provider support (Luna, Azure, Ollama)
+pip install -e ".[openai]"
+
+# With agent self-observability (OTel SDK)
+pip install -e ".[observability]"
+
+# Everything
+pip install -e ".[all]"
 ```
 
-Required environment variables (or use CLI flags):
+### Environment Variables
+
+**Required (or pass as CLI flags):**
 
 | Variable | Description |
 |---|---|
@@ -228,19 +263,48 @@ Required environment variables (or use CLI flags):
 | `SPLUNK_ACCESS_TOKEN` | Splunk API access token |
 | `SPLUNK_ENVIRONMENT` | Target environment name |
 | `AWS_DEFAULT_REGION` | AWS region for Bedrock (default: `us-west-2`) |
-| `AWS_ACCESS_KEY_ID` | AWS credentials |
-| `AWS_SECRET_ACCESS_KEY` | AWS credentials |
+| `AWS_ACCESS_KEY_ID` | AWS credentials for Bedrock |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials for Bedrock |
 
-Streaming mode environment variables:
+**LLM provider (OpenAI-compatible):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_PROVIDER` | `bedrock` | `bedrock` or `openai` (any OpenAI-compatible endpoint) |
+| `OPENAI_BASE_URL` | _(none)_ | Base URL for OpenAI-compatible endpoint (e.g. `http://localhost:8080/v1`) |
+| `OPENAI_API_KEY` | _(none)_ | API key for the OpenAI-compatible endpoint |
+| `OPENAI_MODEL` | _(none)_ | Model name to use (e.g. `luna`, `gpt-4o`, `mistral`) |
+
+**Streaming mode:**
 
 | Variable | Default | Description |
 |---|---|---|
 | `OTLP_RECEIVER_PORT` | `4318` | Port for the OTLP/HTTP receiver |
 | `OTLP_RECEIVER_HOST` | `0.0.0.0` | Bind address for the OTLP/HTTP receiver |
-| `ALERT_WEBHOOK_URL` | _(none)_ | Optional webhook URL for alert notifications |
+| `ALERT_WEBHOOK_URL` | _(none)_ | Webhook URL for streaming alert notifications |
 | `ALERT_COOLDOWN_SECONDS` | `300` | Minimum seconds between repeated alerts for the same issue |
 
-Optional path overrides (defaults to sibling directories):
+**Tuning:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `SPECIALIST_TIMEOUT` | `900` | Max seconds per specialist agent before timeout |
+| `TOOL_TIMEOUT` | `300` | Max seconds per subprocess tool call |
+
+**Approval workflow:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `APPROVAL_WEBHOOK_URL` | _(none)_ | Webhook to POST pending actions to; expects `{"approved": [1,3]}` response |
+| `APPROVAL_TIMEOUT_SECONDS` | `0` | Auto-approve all after N seconds with no webhook response (0 = wait indefinitely) |
+
+**Self-observability:**
+
+| Variable | Description |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint to send agent spans/metrics to (e.g. `http://localhost:4318`) |
+
+**Optional path overrides (defaults to sibling directories):**
 
 | Variable | Description |
 |---|---|
@@ -256,10 +320,10 @@ Optional path overrides (defaults to sibling directories):
 ### Batch Mode
 
 ```bash
-# One-shot full assessment (dry-run — no changes made)
+# One-shot full assessment (dry-run — no changes made, approval workflow shown)
 python3 main.py --realm us1 --token $TOKEN --environment production
 
-# One-shot with auto-apply (deploys detectors, applies fixes)
+# One-shot with auto-apply (deploys detectors, applies fixes, no approval prompt)
 python3 main.py --realm us1 --token $TOKEN --environment production --auto-apply
 
 # Scope to a specific service
@@ -269,12 +333,37 @@ python3 main.py --realm us1 --token $TOKEN --environment production --service pa
 python3 main.py --realm us1 --token $TOKEN --environment production \
   --prompt "Which services have the worst instrumentation coverage and why?"
 
-# Continuous watch mode — runs every 60 minutes
+# Continuous watch mode — runs every 60 minutes, approval workflow between runs
 python3 main.py --realm us1 --token $TOKEN --environment production --watch
 
 # Watch mode with custom interval and auto-apply
 python3 main.py --realm us1 --token $TOKEN --environment production \
   --watch --interval 30 --auto-apply
+```
+
+### Using an OpenAI-Compatible LLM (Luna, Azure, Ollama)
+
+```bash
+# Galileo Luna (self-hosted)
+LLM_PROVIDER=openai \
+OPENAI_BASE_URL=http://your-luna-host:8080/v1 \
+OPENAI_MODEL=luna \
+OPENAI_API_KEY=none \
+python3 main.py --realm us1 --token $TOKEN --environment production
+
+# Azure OpenAI
+LLM_PROVIDER=openai \
+OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/deployments/gpt-4o \
+OPENAI_API_KEY=$AZURE_OPENAI_KEY \
+OPENAI_MODEL=gpt-4o \
+python3 main.py --realm us1 --token $TOKEN --environment production
+
+# Local Ollama
+LLM_PROVIDER=openai \
+OPENAI_BASE_URL=http://localhost:11434/v1 \
+OPENAI_MODEL=llama3.1 \
+OPENAI_API_KEY=none \
+python3 main.py --realm us1 --token $TOKEN --environment production
 ```
 
 ### Streaming Mode
@@ -286,26 +375,25 @@ python3 main.py --realm us1 --token $TOKEN --environment production --streaming
 # Streaming only (receive telemetry + real-time alerts, no batch assessments)
 python3 main.py --realm us1 --token $TOKEN --environment production --streaming-only
 
-# Streaming with custom interval and alert webhook
-ALERT_WEBHOOK_URL=https://your-webhook.example.com/alerts \
+# Streaming with alert webhook and 30-minute batch interval
+ALERT_WEBHOOK_URL=https://hooks.example.com/o11y-alerts \
 python3 main.py --realm us1 --token $TOKEN --environment production \
   --streaming --interval 30 --auto-apply
 ```
 
-Once running, the agent listens on `http://0.0.0.0:4318` (configurable via `OTLP_RECEIVER_PORT`). Point your OTel Collector gateway at it:
+The receiver listens on `http://0.0.0.0:4318`. Configure your gateway exporter:
 
 ```yaml
-# Add to your gateway exporters:
 exporters:
   otlp/o11y_agent:
     endpoint: "http://<agent-host>:4318"
+    encoding: json      # REQUIRED — receiver parses JSON only
     tls:
       insecure: true
     retry_on_failure:
-      enabled: false   # never block primary export path
+      enabled: false    # never block primary export path
     timeout: 5s
 
-# Add to each pipeline's exporters list (LAST, after splunk_hec/signalfx):
 service:
   pipelines:
     traces:
@@ -317,7 +405,7 @@ service:
 ### Kubernetes Deployment (Helm)
 
 ```bash
-# Add the o11y-agent chart (from this repo)
+# Streaming mode (default) — always-on pod with OTLP receiver
 helm install o11y-agent ./charts/o11y-agent \
   --set splunk.realm=us1 \
   --set splunk.accessToken=$SPLUNK_ACCESS_TOKEN \
@@ -326,20 +414,27 @@ helm install o11y-agent ./charts/o11y-agent \
   --set aws.region=us-west-2 \
   --set splunk.environment=production
 
-# Streaming mode (default) — deploys an always-on pod with OTLP receiver
-# Batch mode — deploys a CronJob instead:
+# Batch mode — CronJob instead of Deployment
 helm install o11y-agent ./charts/o11y-agent \
   --set mode.type=batch \
   --set mode.schedule="0 * * * *" \
-  ...
+  --set splunk.realm=us1 ...
 
-# Patch your existing splunk-otel-collector gateway to fan out to the agent:
+# Patch your existing gateway to fan out to the agent (one command):
 helm upgrade splunk-otel-collector splunk-otel/splunk-otel-collector \
   -f <(kubectl get cm o11y-agent-gateway-patch \
            -o jsonpath='{.data.values\.yaml}')
 ```
 
-The `gateway-patch-configmap.yaml` Helm template renders a `values.yaml` fragment automatically populated with the agent's in-cluster DNS name and receiver port. Apply it to your existing gateway release with the command above — no manual YAML editing required.
+### Agent Self-Observability
+
+```bash
+# Point the agent at its own OTel Collector to emit self-monitoring telemetry
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+python3 main.py --realm us1 --token $TOKEN --environment production --watch
+```
+
+The agent emits spans (`o11y_agent.assessment`, `o11y_agent.specialist_run`) and metrics to your Splunk Observability Cloud instance. Build a dashboard on `o11y_agent.*` metrics to track assessment cadence, issue trends, and instrumentation score over time.
 
 ---
 
@@ -369,6 +464,15 @@ The `gateway-patch-configmap.yaml` Helm template renders a `values.yaml` fragmen
 - Provisions or recommends best-practice detectors tuned to actual traffic patterns
 - Retunes existing detectors when baselines have drifted
 - Auto-detects GenAI/agentic services and applies specialized detector templates
+- Populates `actions_taken` with every detector deployed or retuned (audit trail)
+
+### Log Specialist _(new)_
+- Searches for ERROR/CRITICAL log entries across all services
+- Groups log messages by fingerprint to surface top recurring error patterns
+- Identifies services with zero log output (complete logging gap)
+- Flags log volume anomalies: services generating disproportionate log traffic
+- Correlates log error counts with APM error rates to distinguish instrumentation gaps from real failures
+- Uses Splunk Observability REST API directly — no subprocess dependency
 
 ---
 
@@ -376,46 +480,65 @@ The `gateway-patch-configmap.yaml` Helm template renders a `values.yaml` fragmen
 
 ```
 autonomous-o11y-agent/
-├── main.py                   # CLI entrypoint — batch + streaming flags
-├── loop.py                   # run_once() and watch() loop
-├── agent.py                  # build_agent() — wires config to coordinator
-├── agent_loop.py             # Bedrock Converse API tool-calling loop
-├── config.py                 # AgentConfig dataclass (incl. streaming fields)
-├── state.py                  # RunRecord + trend_context() + build_run_record()
-├── generate_report.py        # DOCX report generator
+├── main.py                    # CLI entrypoint — batch, streaming, approval, self-monitoring
+├── loop.py                    # run_once() and watch() loop + approval integration
+├── agent.py                   # build_agent() — wires config to coordinator
+├── agent_loop.py              # Provider-agnostic tool-calling loop
+├── config.py                  # AgentConfig dataclass (provider, streaming, timeouts, approval)
+├── state.py                   # RunRecord + trend_context() + build_run_record()
+├── generate_report.py         # DOCX report generator
+│
+├── providers/                 # LLM provider abstraction (Gap 6)
+│   ├── base.py                # LLMProvider ABC
+│   ├── bedrock.py             # AWS Bedrock Converse API
+│   └── openai_compat.py       # OpenAI-compatible (Luna · Azure · Vertex · Ollama)
+│
 ├── agents/
-│   ├── coordinator.py        # Parallel dispatch, cross-domain analysis, synthesis
-│   ├── health.py             # Health specialist → SpecialistFindings
-│   ├── instrumentation.py    # Instrumentation specialist → SpecialistFindings
-│   ├── governance.py         # Governance specialist → SpecialistFindings
-│   └── detector.py           # Detector specialist → SpecialistFindings
+│   ├── coordinator.py         # 5-specialist parallel dispatch, cross-domain analysis, synthesis
+│   ├── health.py              # Health specialist → SpecialistFindings
+│   ├── instrumentation.py     # Instrumentation specialist → SpecialistFindings
+│   ├── governance.py          # Governance specialist → SpecialistFindings
+│   ├── detector.py            # Detector specialist → SpecialistFindings + actions_taken
+│   └── logs.py                # Log specialist → SpecialistFindings  (new)
+│
 ├── tools/
-│   ├── health_check.py       # Wraps splunk-o11y-health-check
-│   ├── analyzer.py           # Wraps o11y-instrumentation-analyzer
-│   ├── governance.py         # Wraps o11y-usage-governance + full_cardinality_scan
-│   ├── provisioner.py        # Wraps auto-detector-provisioner
-│   ├── findings.py           # SpecialistFindings + Issue dataclasses + SUBMIT_SCHEMA
-│   └── _runner.py            # Shared subprocess runner + batch_run() parallel exec
+│   ├── health_check.py        # Wraps splunk-o11y-health-check
+│   ├── analyzer.py            # Wraps o11y-instrumentation-analyzer
+│   ├── governance.py          # Wraps o11y-usage-governance + full_cardinality_scan
+│   ├── provisioner.py         # Wraps auto-detector-provisioner
+│   ├── log_analyzer.py        # Direct Splunk REST API: error logs, patterns, volume  (new)
+│   ├── findings.py            # SpecialistFindings · Issue · SUBMIT_SCHEMA · actions_taken
+│   └── _runner.py             # Shared subprocess runner + batch_run() parallel exec
+│
 ├── streaming/
-│   ├── pipeline.py           # StreamingPipeline — fan-out to all real-time detectors
-│   ├── pii_scanner.py        # PII/PCI regex scanner (card numbers, SSN, email, phone)
-│   ├── attribute_checker.py  # Required OTel attribute validator (spans + metrics)
-│   ├── cardinality_tracker.py# Sliding-window cardinality counter + drop YAML generator
-│   ├── service_tracker.py    # New service.name detector + provisioning callback
-│   └── alerts.py             # AlertDispatcher — dedup, cooldown, stdout + webhook
+│   ├── pipeline.py            # StreamingPipeline fan-out + ObservationBuffer bridge
+│   ├── observations.py        # ObservationBuffer — 2h sliding window (new)
+│   ├── pii_scanner.py         # PCI/PII regex scanner (card numbers, SSN, email, phone)
+│   ├── attribute_checker.py   # Required OTel attribute validator (spans + metrics)
+│   ├── cardinality_tracker.py # Sliding-window cardinality counter + drop YAML generator
+│   ├── service_tracker.py     # New service.name detector + provisioning callback
+│   └── alerts.py              # AlertDispatcher — dedup, cooldown, stdout + webhook
+│
 ├── receiver/
-│   └── otlp_receiver.py      # Flask OTLP/HTTP receiver — /v1/traces, /v1/metrics, /healthz
+│   └── otlp_receiver.py       # Flask OTLP/HTTP receiver — JSON only, protobuf warning
+│
+├── approval/                  # Human-in-the-loop workflow (new)
+│   └── workflow.py            # PendingAction · ApprovalWorkflow (interactive/webhook/auto)
+│
+├── observability/             # Agent self-observability (new)
+│   └── self_monitor.py        # OTel spans + metrics for agent's own operations
+│
 └── charts/
     └── o11y-agent/
         ├── Chart.yaml
-        ├── values.yaml       # mode.type, receiver, alerts, persistence, gatewayPatch
+        ├── values.yaml        # mode.type, receiver, alerts, persistence, gatewayPatch
         └── templates/
-            ├── deployment.yaml              # streaming mode — always-on pod
-            ├── cronjob.yaml                 # batch mode — scheduled CronJob
-            ├── service.yaml                 # ClusterIP exposing OTLP port
-            ├── gateway-patch-configmap.yaml # values fragment for gateway helm upgrade
-            ├── pvc.yaml                     # persistent state volume
-            ├── secret.yaml                  # Splunk + AWS credentials
+            ├── deployment.yaml               # streaming mode — always-on pod
+            ├── cronjob.yaml                  # batch mode — scheduled CronJob
+            ├── service.yaml                  # ClusterIP exposing OTLP port
+            ├── gateway-patch-configmap.yaml  # encoding:json + values fragment for helm upgrade
+            ├── pvc.yaml                      # persistent state volume
+            ├── secret.yaml                   # Splunk + AWS credentials
             ├── serviceaccount.yaml
             └── _helpers.tpl
 ```
