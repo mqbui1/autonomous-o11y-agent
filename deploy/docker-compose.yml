@@ -1,0 +1,647 @@
+# Autonomous O11y Agent + Splunk Gateway Collector + OpenTelemetry Astronomy Shop
+#
+# Usage:
+#   cp .env.example .env         # fill in your Splunk credentials
+#   docker compose up -d         # start everything
+#   docker compose logs -f o11y-agent   # watch agent assessments
+#
+# The Astronomy Shop generates realistic e-commerce telemetry (traces, metrics, logs).
+# The Splunk gateway collector receives all OTLP data and forwards to Splunk O11y Cloud.
+# The Autonomous O11y Agent runs every 30 minutes, assessing the environment in Splunk.
+
+x-default-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "5m"
+    max-file: "2"
+    tag: "{{.Name}}"
+
+networks:
+  default:
+    name: opentelemetry-demo
+    driver: bridge
+
+services:
+
+  # ============================================================
+  # SPLUNK GATEWAY OTEL COLLECTOR
+  # Receives all telemetry from Astronomy Shop services and
+  # forwards traces/metrics/logs to Splunk Observability Cloud.
+  # ============================================================
+  otel-collector:
+    image: quay.io/signalfx/splunk-otel-collector:latest
+    container_name: otel-collector
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    command: ["--config=/etc/otel/otelcol-config.yml"]
+    user: "0:0"
+    volumes:
+      - ./otelcol-config.yml:/etc/otel/otelcol-config.yml:ro
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "13133:13133"  # health_check
+    environment:
+      - SPLUNK_ACCESS_TOKEN
+      - SPLUNK_REALM
+      - SPLUNK_HEC_TOKEN
+      - SPLUNK_HEC_URL
+      - SPLUNK_ENVIRONMENT
+      - GOMEMLIMIT=200MiB
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  # ============================================================
+  # AUTONOMOUS O11Y AGENT
+  # Runs continuous watch-mode assessments against the Splunk
+  # environment where the Astronomy Shop sends its telemetry.
+  # ============================================================
+  o11y-agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    container_name: o11y-agent
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment:
+      - SPLUNK_ACCESS_TOKEN
+      - SPLUNK_REALM
+      - SPLUNK_ENVIRONMENT
+      # AWS credentials for Bedrock LLM (default provider)
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      # Optional: switch to OpenAI-compatible provider
+      - LLM_PROVIDER=${LLM_PROVIDER:-bedrock}
+      - OPENAI_BASE_URL
+      - OPENAI_API_KEY
+      - OPENAI_MODEL
+      # Agent behaviour
+      - WATCH_INTERVAL=${WATCH_INTERVAL:-30}
+      - AUTO_APPLY=${AUTO_APPLY:-false}
+    volumes:
+      - agent-state:/home/agent/.o11y-agent
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  # ============================================================
+  # ASTRONOMY SHOP — CORE SERVICES
+  # All services send OTLP telemetry to the Splunk gateway above.
+  # ============================================================
+
+  accounting:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-accounting
+    container_name: accounting
+    deploy:
+      resources:
+        limits:
+          memory: 120M
+    restart: unless-stopped
+    environment:
+      - KAFKA_ADDR=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=accounting
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    logging: *logging
+
+  ad:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-ad
+    container_name: ad
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+    restart: unless-stopped
+    ports:
+      - "9555"
+    environment:
+      - AD_PORT=9555
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_SERVICE_NAME=ad
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      flagd:
+        condition: service_started
+    logging: *logging
+
+  cart:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-cart
+    container_name: cart
+    deploy:
+      resources:
+        limits:
+          memory: 160M
+    restart: unless-stopped
+    ports:
+      - "7070"
+    environment:
+      - CART_PORT=7070
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - VALKEY_ADDR=valkey-cart:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=cart
+      - ASPNETCORE_URLS=http://*:7070
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      valkey-cart:
+        condition: service_started
+    logging: *logging
+
+  checkout:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-checkout
+    container_name: checkout
+    deploy:
+      resources:
+        limits:
+          memory: 20M
+    restart: unless-stopped
+    ports:
+      - "5050"
+    environment:
+      - CHECKOUT_PORT=5050
+      - CART_ADDR=cart:7070
+      - CURRENCY_ADDR=currency:7001
+      - EMAIL_ADDR=http://email:6060
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - PAYMENT_ADDR=payment:50051
+      - PRODUCT_CATALOG_ADDR=product-catalog:3550
+      - SHIPPING_ADDR=shipping:50050
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=checkout
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      cart:
+        condition: service_started
+      currency:
+        condition: service_started
+      email:
+        condition: service_started
+      payment:
+        condition: service_started
+      product-catalog:
+        condition: service_started
+      shipping:
+        condition: service_started
+    logging: *logging
+
+  currency:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-currency
+    container_name: currency
+    deploy:
+      resources:
+        limits:
+          memory: 20M
+    restart: unless-stopped
+    ports:
+      - "7001"
+    environment:
+      - CURRENCY_PORT=7001
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT},service.name=currency
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  email:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-email
+    container_name: email
+    deploy:
+      resources:
+        limits:
+          memory: 100M
+    restart: unless-stopped
+    ports:
+      - "6060"
+    environment:
+      - APP_ENV=production
+      - EMAIL_PORT=6060
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=email
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  fraud-detection:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-fraud-detection
+    container_name: fraud-detection
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+    restart: unless-stopped
+    environment:
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - KAFKA_ADDR=kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=fraud-detection
+      - OTEL_LOGS_EXPORTER=otlp
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    logging: *logging
+
+  frontend:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-frontend
+    container_name: frontend
+    deploy:
+      resources:
+        limits:
+          memory: 250M
+    restart: unless-stopped
+    ports:
+      - "8080"
+    environment:
+      - PORT=8080
+      - FRONTEND_ADDR=frontend:8080
+      - AD_ADDR=ad:9555
+      - CART_ADDR=cart:7070
+      - CHECKOUT_ADDR=checkout:5050
+      - CURRENCY_ADDR=currency:7001
+      - PRODUCT_CATALOG_ADDR=product-catalog:3550
+      - RECOMMENDATION_ADDR=recommendation:9001
+      - SHIPPING_ADDR=shipping:50050
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=frontend
+      - PUBLIC_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:8080/otlp-http/v1/traces
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - WEB_OTEL_SERVICE_NAME=frontend-web
+      - OTEL_COLLECTOR_HOST=otel-collector
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - ENV_PLATFORM=local
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      ad:
+        condition: service_started
+      cart:
+        condition: service_started
+      checkout:
+        condition: service_started
+      currency:
+        condition: service_started
+      product-catalog:
+        condition: service_started
+      recommendation:
+        condition: service_started
+      shipping:
+        condition: service_started
+      image-provider:
+        condition: service_started
+    logging: *logging
+
+  frontend-proxy:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-frontend-proxy
+    container_name: frontend-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 65M
+    restart: unless-stopped
+    ports:
+      - "8080:8080"    # Main demo UI — open http://localhost:8080
+      - "10000:10000"  # Envoy admin
+    environment:
+      - FRONTEND_PORT=8080
+      - FRONTEND_HOST=frontend
+      - LOCUST_WEB_HOST=load-generator
+      - LOCUST_WEB_PORT=8089
+      - GRAFANA_PORT=3000
+      - GRAFANA_HOST=grafana
+      - JAEGER_PORT=16686
+      - JAEGER_HOST=jaeger
+      - OTEL_COLLECTOR_HOST=otel-collector
+      - OTEL_COLLECTOR_PORT_GRPC=4317
+      - OTEL_COLLECTOR_PORT_HTTP=4318
+      - IMAGE_PROVIDER_HOST=image-provider
+      - IMAGE_PROVIDER_PORT=8081
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=frontend-proxy
+      - ENVOY_PORT=8080
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - FLAGD_UI_HOST=flagd-ui
+      - FLAGD_UI_PORT=4000
+    depends_on:
+      frontend:
+        condition: service_started
+      load-generator:
+        condition: service_started
+      grafana:
+        condition: service_started
+      jaeger:
+        condition: service_started
+    dns_search: ""
+    logging: *logging
+
+  image-provider:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-image-provider
+    container_name: image-provider
+    deploy:
+      resources:
+        limits:
+          memory: 120M
+    restart: unless-stopped
+    ports:
+      - "8081"
+    environment:
+      - IMAGE_PROVIDER_PORT=8081
+      - OTEL_COLLECTOR_HOST=otel-collector
+      - OTEL_COLLECTOR_PORT_GRPC=4317
+      - OTEL_SERVICE_NAME=image-provider
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  load-generator:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-load-generator
+    container_name: load-generator
+    deploy:
+      resources:
+        limits:
+          memory: 120M
+    restart: unless-stopped
+    ports:
+      - "8089:8089"    # Locust UI — open http://localhost:8089
+    environment:
+      - LOCUST_WEB_PORT=8089
+      - LOCUST_USERS=${LOCUST_USERS:-5}
+      - LOCUST_HOST=http://frontend-proxy:8080
+      - LOCUST_HEADLESS=false
+      - LOCUST_AUTOSTART=true
+      - LOCUST_BROWSER_TRAFFIC_ENABLED=false
+      - LOCUST_WEB_HOST=0.0.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=load-generator
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+    depends_on:
+      frontend:
+        condition: service_started
+      flagd:
+        condition: service_started
+    logging: *logging
+
+  payment:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-payment
+    container_name: payment
+    deploy:
+      resources:
+        limits:
+          memory: 120M
+    restart: unless-stopped
+    ports:
+      - "50051"
+    environment:
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - PAYMENT_PORT=50051
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=payment
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      flagd:
+        condition: service_started
+    logging: *logging
+
+  product-catalog:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-product-catalog
+    container_name: product-catalog
+    deploy:
+      resources:
+        limits:
+          memory: 20M
+    restart: unless-stopped
+    ports:
+      - "3550"
+    environment:
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - PRODUCT_CATALOG_PORT=3550
+      - PRODUCT_CATALOG_RELOAD_INTERVAL=10
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=product-catalog
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  quote:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-quote
+    container_name: quote
+    deploy:
+      resources:
+        limits:
+          memory: 40M
+    restart: unless-stopped
+    ports:
+      - "8090"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_PHP_AUTOLOAD_ENABLED=true
+      - QUOTE_PORT=8090
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=quote
+      - OTEL_PHP_INTERNAL_METRICS_ENABLED=true
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  recommendation:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-recommendation
+    container_name: recommendation
+    deploy:
+      resources:
+        limits:
+          memory: 50M
+    restart: unless-stopped
+    ports:
+      - "9001"
+    environment:
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
+      - RECOMMENDATION_PORT=9001
+      - PRODUCT_CATALOG_ADDR=product-catalog:3550
+      - OTEL_PYTHON_LOG_CORRELATION=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=recommendation
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      product-catalog:
+        condition: service_started
+    logging: *logging
+
+  shipping:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-shipping
+    container_name: shipping
+    deploy:
+      resources:
+        limits:
+          memory: 20M
+    restart: unless-stopped
+    ports:
+      - "50050"
+    environment:
+      - SHIPPING_PORT=50050
+      - QUOTE_ADDR=http://quote:8090
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=shipping
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    logging: *logging
+
+  # ============================================================
+  # REQUIRED DEPENDENCIES
+  # ============================================================
+
+  flagd:
+    image: ghcr.io/open-feature/flagd:v0.12.1
+    container_name: flagd
+    deploy:
+      resources:
+        limits:
+          memory: 75M
+    restart: unless-stopped
+    environment:
+      - FLAGD_OTEL_COLLECTOR_URI=otel-collector:4317
+      - FLAGD_METRICS_EXPORTER=otel
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=flagd
+    command: ["start", "--uri", "file:./etc/flagd/demo.flagd.json"]
+    ports:
+      - "8013"
+    volumes:
+      - ./demo.flagd.json:/etc/flagd/demo.flagd.json:ro
+    logging: *logging
+
+  valkey-cart:
+    image: valkey/valkey:8.1-alpine
+    container_name: valkey-cart
+    user: valkey
+    deploy:
+      resources:
+        limits:
+          memory: 20M
+    restart: unless-stopped
+    ports:
+      - "6379"
+    logging: *logging
+
+  kafka:
+    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-kafka
+    container_name: kafka
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+    restart: unless-stopped
+    environment:
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
+      - OTEL_SERVICE_NAME=kafka
+      - KAFKA_HEAP_OPTS=-Xmx400m -Xms400m
+    healthcheck:
+      test: nc -z kafka 9092
+      start_period: 10s
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    logging: *logging
+
+  # ============================================================
+  # MINIMAL UI STUBS (required by frontend-proxy routing config)
+  # These are lightweight — no OSS backend is needed since we
+  # forward all telemetry to Splunk Observability Cloud.
+  # ============================================================
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.66.0
+    container_name: jaeger
+    command:
+      - "--memory.max-traces=500"
+      - "--query.base-path=/jaeger/ui"
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+    restart: unless-stopped
+    ports:
+      - "16686"
+    environment:
+      - METRICS_STORAGE_TYPE=memory
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    deploy:
+      resources:
+        limits:
+          memory: 100M
+    restart: unless-stopped
+    ports:
+      - "3000"
+    logging: *logging
+
+volumes:
+  agent-state:
+    driver: local
