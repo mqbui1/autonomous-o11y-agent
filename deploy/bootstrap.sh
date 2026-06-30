@@ -218,12 +218,27 @@ echo "Collector deployed."
 echo ""
 echo "── Step 6: Astronomy Shop ───────────────────────────────────────────"
 kubectl create namespace astronomy-shop --dry-run=client -o yaml | kubectl apply -f -
+
+# Clear any stuck pending-install before retrying
+HELM_STATUS=\$(helm status astronomy-shop -n astronomy-shop --output json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('info',{}).get('status',''))" 2>/dev/null || echo "")
+if [ "\$HELM_STATUS" = "pending-install" ]; then
+  echo "Clearing stuck pending-install..."
+  kubectl delete secret -n astronomy-shop -l "name=astronomy-shop,owner=helm" 2>/dev/null || true
+fi
+
+# Use --wait=false so Helm returns immediately — pods start in background.
+# This prevents SSH from holding a connection while 20+ containers pull and start.
 helm upgrade --install astronomy-shop \
   open-telemetry/opentelemetry-demo \
   --namespace astronomy-shop \
   --values "\$REPO_DIR/deploy/values/astronomy-shop-values.yaml" \
-  --wait --timeout=10m
-echo "Astronomy Shop deployed."
+  --wait=false
+
+echo "Astronomy Shop install kicked off (pods starting in background)."
+echo "Waiting 90s for pods to stabilize before proceeding..."
+sleep 90
+echo "Pod status:"
+kubectl get pods -n astronomy-shop --no-headers 2>/dev/null | awk '{print \$3}' | sort | uniq -c || true
 
 # ── Step 7: o11y-agent ────────────────────────────────────────────────────
 echo ""
