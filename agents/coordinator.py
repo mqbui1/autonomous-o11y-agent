@@ -1,15 +1,21 @@
 """
-Coordinator — runs all four specialist agents in parallel and synthesizes findings.
+Coordinator — runs all specialist agents in parallel and synthesizes findings.
 
 Architecture:
     coordinator
      ├── [parallel] health_agent         → detectors, APM, collector, license
      ├── [parallel] instrumentation_agent → span/metric/log quality
      ├── [parallel] governance_agent     → cardinality, cost, trace volume
-     └── [parallel] detector_agent       → provisioning, baselines, lifecycle
+     ├── [parallel] detector_agent       → provisioning, baselines, lifecycle
+     ├── [parallel] logs_agent           → log anomalies, error bursts
+     ├── [parallel] rum_agent            → frontend UX, Core Web Vitals
+     └── [parallel] rca_agent            → incident root cause analysis, causal chain
      └── _cross_domain_analysis()        → finds services/issues spanning domains (Gap 4)
      └── _synthesize()                   → LLM pass with all tools available  (Gap 5)
      └── build_run_record() + save_state → structured persistence             (Gap 3)
+
+run_incident_rca(config, alert):
+    Triggered by streaming critical alerts — runs targeted RCA for a specific incident.
 """
 
 import logging
@@ -28,6 +34,7 @@ import agents.governance as governance_agent
 import agents.detector as detector_agent
 import agents.logs as logs_agent
 import agents.rum as rum_agent
+import agents.rca as rca_agent
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +89,7 @@ def run_assessment(
         "detector": detector_agent,
         "logs": logs_agent,
         "rum": rum_agent,
+        "rca": rca_agent,
     }
 
     logger.info(
@@ -94,7 +102,7 @@ def run_assessment(
     _run_start = _time.time()
 
     findings: dict[str, SpecialistFindings] = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             pool.submit(mod.run, config, state_context): name
             for name, mod in specialists.items()
@@ -221,7 +229,7 @@ def _format_findings_for_synthesis(
         parts.append(cross_domain)
         parts.append("")
 
-    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum"):
+    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca"):
         f = findings.get(domain)
         if not f:
             continue
@@ -273,9 +281,10 @@ def _synthesize(
     from tools.provisioner import SCHEMAS as P_SCHEMAS, TOOL_FNS as P_FNS
     from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
     from tools.rum_analyzer import SCHEMAS as R_SCHEMAS, TOOL_FNS as R_FNS
+    from tools.rca_tools import SCHEMAS as RCA_SCHEMAS, TOOL_FNS as RCA_FNS
 
-    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS
-    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS}
+    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS
+    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS, **RCA_FNS}
 
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
@@ -301,3 +310,36 @@ def _synthesize(
                     for d, f in findings.items() if f.summary
                 )
             )
+
+
+def run_incident_rca(config: AgentConfig, service: str, incident_id: str = "",
+                     start_ms: int = 0, severity: str = "critical") -> SpecialistFindings:
+    """
+    Run a targeted RCA for a specific incident. Intended to be called from the
+    streaming alert path when a critical alert fires.
+
+    Example (from main.py streaming loop):
+        from agents.coordinator import run_incident_rca
+        findings = run_incident_rca(config, service="checkout-service",
+                                    incident_id="abc123", start_ms=1719700000000)
+
+    Args:
+        config: AgentConfig with realm, token, environment.
+        service: The primary service the incident is about.
+        incident_id: Splunk incident ID (optional, for context).
+        start_ms: Unix millisecond timestamp when the incident fired.
+        severity: Incident severity (critical/high/medium).
+    """
+    import json as _json
+    incident_context = _json.dumps({
+        "service": service,
+        "incident_id": incident_id,
+        "start_ms": start_ms,
+        "severity": severity,
+        "environment": config.environment,
+    })
+    logger.info(
+        "Running targeted RCA for service=%s incident=%s severity=%s env=%s",
+        service, incident_id, severity, config.environment,
+    )
+    return rca_agent.run(config, incident_context=incident_context)
