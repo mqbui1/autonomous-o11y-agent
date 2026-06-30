@@ -1,0 +1,39 @@
+# Build context: autonomous-o11y-agent repo root (one level above this file)
+FROM python:3.11-slim
+
+WORKDIR /opt/agent
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        boto3>=1.34.0 \
+        openai>=1.0.0 \
+        flask>=3.0.0 \
+        werkzeug>=3.0.0
+
+# Copy agent source (build context is repo root)
+COPY agents/       ./agents/
+COPY tools/        ./tools/
+COPY providers/    ./providers/
+COPY streaming/    ./streaming/
+COPY approval/     ./approval/
+COPY agent.py      ./
+COPY agent_loop.py ./
+COPY config.py     ./
+COPY main.py       ./
+COPY state.py      ./
+COPY loop.py       ./
+COPY narrator.py   ./
+
+# State directory
+RUN mkdir -p /home/agent/.o11y-agent
+
+ENV PYTHONUNBUFFERED=1
+ENV WATCH_INTERVAL=30
+
+# Shell form so ${WATCH_INTERVAL} is expanded at runtime
+CMD python3 main.py --watch --interval ${WATCH_INTERVAL}
