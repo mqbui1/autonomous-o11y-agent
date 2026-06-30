@@ -13,7 +13,7 @@ opensearch:
 
 # Load generator lives under components in this chart version
 components:
-  loadgenerator:
+  load-generator:
     enabled: true
 
 # Configure the built-in OTel Collector to export to the Splunk gateway
