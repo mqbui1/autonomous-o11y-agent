@@ -1,23 +1,25 @@
 # OpenTelemetry Demo (Astronomy Shop) Helm values
 # Routes all telemetry through the Splunk OTel Collector gateway.
 
-# Disable the built-in Jaeger/Prometheus/Grafana — we use Splunk instead
+# Disable the built-in Jaeger/Prometheus/Grafana/OpenSearch — we use Splunk instead
 jaeger:
   enabled: false
 prometheus:
   enabled: false
 grafana:
   enabled: false
+opensearch:
+  enabled: false
 
-# Disable the demo's own load generator (or keep it on for realistic traffic)
-loadgenerator:
-  enabled: true
+# Load generator lives under components in this chart version
+components:
+  loadgenerator:
+    enabled: true
 
 # Configure the built-in OTel Collector to export to the Splunk gateway
 opentelemetry-collector:
   config:
     exporters:
-      # Forward all signals to Splunk OTel Collector gateway
       otlp/splunk:
         endpoint: "splunk-otel-collector-gateway.monitoring.svc.cluster.local:4317"
         tls:
