@@ -27,6 +27,7 @@ import agents.instrumentation as instrumentation_agent
 import agents.governance as governance_agent
 import agents.detector as detector_agent
 import agents.logs as logs_agent
+import agents.rum as rum_agent
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,20 @@ Lead with the highest-impact findings. Be specific — vague recommendations hav
 """
 
 
-def run_assessment(config: AgentConfig, prompt: str = None, observation_buffer=None) -> str:
+def run_assessment(
+    config: AgentConfig,
+    prompt: str = None,
+    observation_buffer=None,
+    monitor=None,
+) -> str:
     """
-    Run all four specialist agents in parallel, perform cross-domain analysis,
+    Run all specialist agents in parallel, perform cross-domain analysis,
     synthesize with full tool access, and persist structured state.
 
-    observation_buffer: optional streaming.observations.ObservationBuffer — when
-    running in streaming mode, recent streaming observations are injected into the
-    synthesis prompt so batch and streaming context are unified.
+    observation_buffer: optional ObservationBuffer — streaming observations
+    injected into specialist context so batch and streaming context are unified.
+
+    monitor: optional SelfMonitor — records run metrics after findings are collected.
     """
     state = load_state(config.environment)
     state_context = state.trend_context()
@@ -74,6 +81,7 @@ def run_assessment(config: AgentConfig, prompt: str = None, observation_buffer=N
         "governance": governance_agent,
         "detector": detector_agent,
         "logs": logs_agent,
+        "rum": rum_agent,
     }
 
     logger.info(
@@ -82,8 +90,11 @@ def run_assessment(config: AgentConfig, prompt: str = None, observation_buffer=N
         config.environment,
     )
 
+    import time as _time
+    _run_start = _time.time()
+
     findings: dict[str, SpecialistFindings] = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {
             pool.submit(mod.run, config, state_context): name
             for name, mod in specialists.items()
@@ -108,17 +119,25 @@ def run_assessment(config: AgentConfig, prompt: str = None, observation_buffer=N
                 )
                 logger.error("Specialist '%s' failed: %s", name, exc, exc_info=True)
 
-    # Gap 4: cross-domain analysis before synthesis
+    # Cross-domain analysis before synthesis
     cross_domain = _cross_domain_analysis(findings)
     if cross_domain:
         logger.info("Cross-domain issues detected — injecting into synthesis")
 
     synthesis = _synthesize(config, findings, cross_domain, prompt)
 
-    # Gap 3: persist rich structured state
+    # Persist rich structured state
     record = build_run_record(config.environment, findings)
     state.add_run(record)
     save_state(state)
+
+    # Emit self-observability metrics now that we have the real findings dict
+    if monitor is not None:
+        try:
+            elapsed = _time.time() - _run_start
+            monitor.record_run_metrics(findings, elapsed, config.environment)
+        except Exception as _exc:
+            logger.debug("SelfMonitor record_run_metrics failed: %s", _exc)
 
     return synthesis
 
@@ -202,7 +221,7 @@ def _format_findings_for_synthesis(
         parts.append(cross_domain)
         parts.append("")
 
-    for domain in ("health", "instrumentation", "governance", "detector", "logs"):
+    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum"):
         f = findings.get(domain)
         if not f:
             continue
@@ -253,17 +272,32 @@ def _synthesize(
     from tools.governance import SCHEMAS as G_SCHEMAS, TOOL_FNS as G_FNS
     from tools.provisioner import SCHEMAS as P_SCHEMAS, TOOL_FNS as P_FNS
     from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
+    from tools.rum_analyzer import SCHEMAS as R_SCHEMAS, TOOL_FNS as R_FNS
 
-    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS
-    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS}
+    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS
+    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS}
 
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
 
-    return run_agent(
-        provider=get_provider(config),
-        system_prompt=system,
-        tools=all_schemas,
-        tool_fns=all_fns,
-        initial_message=message,
-    )
+    # Wrap synthesis in a thread with timeout so a runaway tool loop can't block forever
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            run_agent,
+            provider=get_provider(config),
+            system_prompt=system,
+            tools=all_schemas,
+            tool_fns=all_fns,
+            initial_message=message,
+        )
+        try:
+            return future.result(timeout=config.synthesis_timeout)
+        except TimeoutError:
+            logger.error("Synthesis timed out after %ds", config.synthesis_timeout)
+            return (
+                f"[Synthesis timed out after {config.synthesis_timeout}s]\n\n"
+                + "\n".join(
+                    f"**{d.upper()}:** {f.summary}"
+                    for d, f in findings.items() if f.summary
+                )
+            )

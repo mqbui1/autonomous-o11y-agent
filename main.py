@@ -138,7 +138,7 @@ def main():
     monitor = SelfMonitor.from_config(config)
 
     if args.streaming or args.streaming_only:
-        _run_streaming(agent, config, args)
+        _run_streaming(agent, config, args, monitor=monitor)
         return  # streaming mode runs until killed
 
     if args.watch:
@@ -159,7 +159,7 @@ def main():
         print("\n" + "="*70)
 
 
-def _run_streaming(agent, config, args):
+def _run_streaming(agent, config, args, monitor=None):
     """
     Always-on mode for gateway co-deployment.
 
@@ -228,7 +228,7 @@ def _run_streaming(agent, config, args):
         run_count += 1
         logger.info("[Batch run %d] Starting assessment", run_count)
         try:
-            output = agent(config, prompt=args.prompt, observation_buffer=obs_buffer)
+            output = agent(config, prompt=args.prompt, observation_buffer=obs_buffer, monitor=monitor)
             # Re-seed service tracker after each batch run with updated service list
             updated_state = load_state(config.environment)
             if updated_state.runs:

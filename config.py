@@ -79,3 +79,15 @@ class AgentConfig:
     alert_cooldown_seconds: int = field(
         default_factory=lambda: int(os.environ.get("ALERT_COOLDOWN_SECONDS", "300"))
     )
+    # Comma-separated "detector:service" pairs to suppress permanently.
+    # Example: ALERT_SUPPRESS=pii:test-service,attribute:load-generator
+    alert_suppress_patterns: list = field(
+        default_factory=lambda: [
+            p.strip() for p in os.environ.get("ALERT_SUPPRESS", "").split(",") if p.strip()
+        ]
+    )
+
+    # ── Synthesis / assessment timeouts ───────────────────────────────────────
+    synthesis_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("SYNTHESIS_TIMEOUT", "900"))
+    )

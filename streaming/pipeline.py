@@ -1,8 +1,9 @@
 """
-Streaming pipeline — wires all four detectors together.
+Streaming pipeline — wires all detectors together.
 
 Receives parsed OTLP payloads from the receiver and fans them out
-to: PII scanner, attribute checker, cardinality tracker, service tracker.
+to: PII scanner, attribute checker, cardinality tracker, service tracker,
+and log tracker (for real-time log error/PII detection).
 
 All processing is synchronous within the receiver request so that
 PII findings are logged before the HTTP response is returned —
@@ -19,6 +20,7 @@ from .pii_scanner import PIIScanner
 from .attribute_checker import AttributeChecker
 from .cardinality_tracker import CardinalityTracker
 from .service_tracker import ServiceTracker
+from .log_tracker import LogTracker
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,7 @@ class StreamingPipeline:
         # In OTLP receiver:
         pipeline.process_resource_spans(resource_spans_list)
         pipeline.process_resource_metrics(resource_metrics_list)
+        pipeline.process_resource_logs(resource_logs_list)
     """
 
     def __init__(
@@ -44,12 +47,14 @@ class StreamingPipeline:
         attribute_checker: AttributeChecker,
         cardinality_tracker: CardinalityTracker,
         service_tracker: ServiceTracker,
+        log_tracker: LogTracker,
     ):
         self.dispatcher = dispatcher
         self.pii_scanner = pii_scanner
         self.attribute_checker = attribute_checker
         self.cardinality_tracker = cardinality_tracker
         self.service_tracker = service_tracker
+        self.log_tracker = log_tracker
         self._obs_buffer: ObservationBuffer | None = None
 
     def set_observation_buffer(self, buf: ObservationBuffer):
@@ -65,10 +70,11 @@ class StreamingPipeline:
         def fire_and_record(alert: StreamingAlert):
             original_fire(alert)
             obs_type = {
-                "pii_scanner": "pii",
-                "attribute_checker": "attribute_gap",
-                "cardinality_tracker": "cardinality_spike",
-                "new_service": "new_service",
+                "pii":              "pii",
+                "attribute":        "attribute_gap",
+                "cardinality":      "cardinality_spike",
+                "new_service":      "new_service",
+                "log_tracker":      "attribute_gap",  # log error bursts → attribute_gap bucket
             }.get(alert.detector)
             if obs_type:
                 buf.add(Observation(
@@ -86,6 +92,7 @@ class StreamingPipeline:
             environment=config.environment,
             cooldown_seconds=config.alert_cooldown_seconds,
             webhook_url=config.alert_webhook_url,
+            suppress_patterns=config.alert_suppress_patterns,
         )
         return cls(
             dispatcher=dispatcher,
@@ -93,6 +100,7 @@ class StreamingPipeline:
             attribute_checker=AttributeChecker(dispatcher),
             cardinality_tracker=CardinalityTracker(dispatcher),
             service_tracker=ServiceTracker(dispatcher),
+            log_tracker=LogTracker(dispatcher),
         )
 
     # ── OTLP/traces ──────────────────────────────────────────────────────────
@@ -151,11 +159,52 @@ class StreamingPipeline:
                         self.cardinality_tracker.observe_metric(metric_name, merged)
                         self.attribute_checker.check_metric(metric_name, merged)
 
+    # ── OTLP/logs ─────────────────────────────────────────────────────────────
+
+    def process_resource_logs(self, resource_logs: list[dict]):
+        """
+        Process a resourceLogs array from an OTLP/HTTP JSON payload.
+
+        OTLP/HTTP JSON shape:
+        [
+          {
+            "resource": {"attributes": [...]},
+            "scopeLogs": [
+              {"logRecords": [{"severityText": "ERROR", "severityNumber": 17,
+                               "body": {"stringValue": "..."}, "attributes": [...]}]}
+            ]
+          }
+        ]
+        """
+        for rl in resource_logs:
+            resource_attrs = _parse_attributes(
+                rl.get("resource", {}).get("attributes", [])
+            )
+            service = resource_attrs.get("service.name", "unknown")
+
+            for scope in rl.get("scopeLogs", []):
+                for record in scope.get("logRecords", []):
+                    severity_text = record.get("severityText", "")
+                    severity_number = record.get("severityNumber", 0)
+                    body_container = record.get("body", {})
+                    body = body_container.get("stringValue", "") or str(body_container)
+                    record_attrs = _parse_attributes(record.get("attributes", []))
+
+                    self.log_tracker.observe_log(
+                        service=service,
+                        severity_number=severity_number,
+                        severity_text=severity_text,
+                        body=body[:2000],  # cap body scan length
+                        attributes=record_attrs,
+                        resource_attrs=resource_attrs,
+                    )
+
     def stats(self) -> dict:
         """Summary stats for the /status endpoint."""
         return {
             "known_services": sorted(self.service_tracker.known_services()),
             "top_cardinality": self.cardinality_tracker.top_metrics(10),
+            "log_error_counts": self.log_tracker.error_counts(),
         }
 
 

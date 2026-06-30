@@ -242,12 +242,13 @@ add_paragraph(doc,
     size=11, space_after=6)
 
 add_heading(doc, "Architecture", level=2, color=SPLUNK_DARK)
-add_paragraph(doc, "Four specialist agents run in parallel, coordinated by a synthesis layer:", size=11, space_after=4)
+add_paragraph(doc, "Five specialist agents run in parallel, coordinated by a synthesis layer:", size=11, space_after=4)
 for name, desc in [
     ("Health Agent",           "Audits detector quality, APM service coverage, OTel Collector health, and license utilization"),
     ("Instrumentation Agent",  "Scores APM span, infrastructure metric, and log attribute coverage (0-100); maps every gap to broken UI features"),
     ("Governance Agent",       "Scans metric cardinality, detects slow-burn MTS growth, snapshots trace volume, generates OTel Collector YAML fixes"),
     ("Detector Agent",         "Discovers services, learns behavioral baselines from live telemetry, provisions or retunes detectors"),
+    ("Logs Agent",             "Analyzes error log volumes, recurring failure patterns, and log coverage gaps per service"),
 ]:
     add_bullet(doc, f" - {desc}", bold_prefix=name)
 
