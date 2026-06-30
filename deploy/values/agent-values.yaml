@@ -1,0 +1,38 @@
+# O11y Agent Helm values — astronomy-shop demo
+# Secrets (accessToken, awsKey, etc.) are passed via --set in the deploy script.
+
+mode:
+  type: streaming          # always-on with OTLP receiver
+  intervalMinutes: 60      # batch assessment every 60 minutes
+  autoApply: false         # dry-run — review recommendations first
+
+receiver:
+  port: 4318
+  host: "0.0.0.0"
+
+alerts:
+  cooldownSeconds: 300
+
+# Use the locally built image loaded into k3d
+image:
+  repository: o11y-agent
+  tag: latest
+  pullPolicy: Never        # loaded via k3d image import — no registry needed
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+persistence:
+  enabled: true
+  size: "1Gi"
+
+# Gateway patch ConfigMap — auto-configures collector to fan out to agent
+gatewayPatch:
+  enabled: true
+  collectorNamespace: monitoring
+  collectorServiceName: splunk-otel-collector-gateway

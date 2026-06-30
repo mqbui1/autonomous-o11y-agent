@@ -1,0 +1,41 @@
+# Splunk OTel Collector — gateway mode for astronomy-shop demo
+# Secrets (accessToken, realm, clusterName) are passed via --set in the deploy script.
+
+# Gateway only — no daemonset agent needed for this demo
+agent:
+  enabled: false
+
+gateway:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Receive OTLP from astronomy-shop collector
+gateway:
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+
+clusterReceiver:
+  enabled: false
+
+splunkObservability:
+  # accessToken and realm passed via --set
+  metricsEnabled: true
+  tracesEnabled: true
+  logsEnabled: true
+  profilingEnabled: true
+
+# Send deployment.environment from astronomy shop resource attrs
+environment: "astronomy-shop-demo"

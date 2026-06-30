@@ -1,0 +1,11 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.git
+**/.gitignore
+**/*.md
+**/node_modules
+**/.DS_Store
+autonomous-o11y-agent/AstronomyShop_O11y_Assessment.docx
+autonomous-o11y-agent/~$*
