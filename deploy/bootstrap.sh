@@ -3,20 +3,10 @@
 # bootstrap.sh — One-shot EC2 deploy for o11y-agent + astronomy shop
 #
 # Run from your LOCAL machine (Mac):
-#   1. Set env vars (see below)
-#   2. bash deploy/bootstrap.sh
-#
-# It will:
-#   a. Upload a self-contained run script to the EC2 instance
-#   b. Start it in a single tmux session (safe from SSH disconnects)
-#   c. Tail the log so you can monitor progress
-#
-# Required env vars:
-#   SPLUNK_ACCESS_TOKEN  — ingest/access token
-#   SPLUNK_REALM         — e.g. us1
-#   EC2_HOST             — EC2 IP address
-#   EC2_PASS             — SSH password (default: Sp1unkH00di3)
-#   EC2_PORT             — SSH port (default: 2222)
+#   export SPLUNK_ACCESS_TOKEN=<ingest-token>
+#   export SPLUNK_REALM=us1
+#   export EC2_HOST=<ip>
+#   bash deploy/bootstrap.sh
 #
 # AWS creds are auto-exported from your current AWS SSO session.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24,24 +14,26 @@ set -euo pipefail
 
 : "${SPLUNK_ACCESS_TOKEN:?Set SPLUNK_ACCESS_TOKEN}"
 : "${SPLUNK_REALM:?Set SPLUNK_REALM}"
-: "${EC2_HOST:?Set EC2_HOST (EC2 IP)}"
+: "${EC2_HOST:?Set EC2_HOST}"
 
 EC2_PASS="${EC2_PASS:-Sp1unkH00di3}"
 EC2_PORT="${EC2_PORT:-2222}"
 SPLUNK_ENVIRONMENT="${SPLUNK_ENVIRONMENT:-astronomy-shop-demo}"
 
 # ── Export AWS creds from current SSO session ─────────────────────────────
-echo "Exporting AWS credentials from current SSO session..."
+echo "Exporting AWS credentials from SSO session..."
 eval "$(aws configure export-credentials --format env)" || {
-  echo "ERROR: Failed to export AWS credentials."
-  echo "       Make sure you're logged in: aws sso login"
-  exit 1
+  echo "ERROR: aws configure export-credentials failed. Run: aws sso login"; exit 1
 }
 : "${AWS_ACCESS_KEY_ID:?AWS creds not found}"
-echo "AWS identity: $(aws sts get-caller-identity --query Arn --output text 2>/dev/null || echo unknown)"
+echo "AWS: $(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"
 
-# ── Build the remote run script (heredoc with vars substituted) ───────────
-REMOTE_SCRIPT=$(cat << REMOTE_EOF
+# ── Bake credentials into the remote run script ───────────────────────────
+# NOTE: Use a temp file to avoid passing secrets on the command line.
+TMPSCRIPT=$(mktemp /tmp/run-deploy-XXXXXX.sh)
+trap "rm -f $TMPSCRIPT" EXIT
+
+cat > "$TMPSCRIPT" << REMOTE_EOF
 #!/usr/bin/env bash
 set -euo pipefail
 exec > >(tee -a /tmp/deploy.log) 2>&1
@@ -67,45 +59,132 @@ echo "  O11y Agent — Full Stack Deploy  \$(date)"
 echo "  cluster=\$CLUSTER_NAME  env=\$SPLUNK_ENVIRONMENT"
 echo "================================================================"
 
-# ── Ensure kubectl context ────────────────────────────────────────────────
-kubectl config use-context "k3d-\${CLUSTER_NAME}" 2>/dev/null || true
-
-# ── Pull latest code ──────────────────────────────────────────────────────
+# ── Step 0: Install tools if missing ─────────────────────────────────────
 echo ""
-echo "── Pull latest code ─────────────────────────────────────────────────"
-cd "\$REPO_DIR" && git pull --rebase --autostash
-echo "Git: \$(git log -1 --oneline)"
+echo "── Step 0: Install tools ────────────────────────────────────────────"
 
-# ── Helm repos ────────────────────────────────────────────────────────────
+# Docker
+if ! command -v docker &>/dev/null; then
+  echo "Installing Docker..."
+  # Remove any broken apt sources first
+  sudo rm -f /etc/apt/sources.list.d/splunk* 2>/dev/null || true
+  curl -fsSL https://get.docker.com | sudo sh
+  sudo usermod -aG docker splunk || true
+  sudo systemctl enable --now docker
+else
+  echo "Docker: \$(docker --version)"
+fi
+
+# Ensure docker is accessible without sudo
+if ! docker ps &>/dev/null; then
+  sudo chmod 666 /var/run/docker.sock 2>/dev/null || true
+fi
+
+# k3d
+if ! command -v k3d &>/dev/null; then
+  echo "Installing k3d..."
+  curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+else
+  echo "k3d: \$(k3d version | head -1)"
+fi
+
+# kubectl
+if ! command -v kubectl &>/dev/null; then
+  echo "Installing kubectl..."
+  sudo snap install kubectl --classic 2>/dev/null || \
+    (KUBE_VER=\$(curl -sSL https://dl.k8s.io/release/stable.txt) && \
+     curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/\${KUBE_VER}/bin/linux/amd64/kubectl" && \
+     sudo install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl)
+else
+  echo "kubectl: \$(kubectl version --client --short 2>/dev/null | head -1 || kubectl version --client | head -1)"
+fi
+
+# helm
+if ! command -v helm &>/dev/null; then
+  echo "Installing Helm..."
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+else
+  echo "Helm: \$(helm version --short)"
+fi
+
+# tmux
+if ! command -v tmux &>/dev/null; then
+  sudo apt-get install -y tmux 2>/dev/null || true
+fi
+
+echo "Tools ready."
+
+# ── Step 1: Clone repos if missing ────────────────────────────────────────
 echo ""
-echo "── Helm repos ───────────────────────────────────────────────────────"
+echo "── Step 1: Clone repos ──────────────────────────────────────────────"
+
+REPOS=(
+  "autonomous-o11y-agent"
+  "auto-detector-provisioner"
+  "o11y-usage-governance"
+  "o11y-instrumentation-analyzer"
+  "splunk-o11y-health-check"
+)
+for repo in "\${REPOS[@]}"; do
+  if [ -d "\$PARENT_DIR/\$repo" ]; then
+    echo "  \$repo: already cloned"
+    cd "\$PARENT_DIR/\$repo" && git pull --rebase --autostash 2>/dev/null || true
+  else
+    echo "  Cloning \$repo..."
+    git clone --depth=1 "https://github.com/mqbui1/\$repo" "\$PARENT_DIR/\$repo"
+  fi
+done
+echo "Repos ready. Agent: \$(cd \$REPO_DIR && git log -1 --oneline)"
+
+# ── Step 2: k3d cluster ───────────────────────────────────────────────────
+echo ""
+echo "── Step 2: k3d cluster ──────────────────────────────────────────────"
+
+if k3d cluster list 2>/dev/null | grep -q "^\${CLUSTER_NAME}"; then
+  echo "Cluster '\$CLUSTER_NAME' already exists."
+else
+  echo "Creating k3d cluster '\$CLUSTER_NAME'..."
+  k3d cluster create "\$CLUSTER_NAME" \
+    --servers 1 --agents 2 \
+    --port "8080:80@loadbalancer" \
+    --port "4317:4317@loadbalancer" \
+    --port "4318:4318@loadbalancer" \
+    --wait
+fi
+kubectl config use-context "k3d-\${CLUSTER_NAME}"
+echo "Cluster ready: \$(kubectl cluster-info 2>/dev/null | head -1)"
+
+# ── Step 3: Helm repos ────────────────────────────────────────────────────
+echo ""
+echo "── Step 3: Helm repos ───────────────────────────────────────────────"
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
 helm repo add splunk-otel-collector-chart https://signalfx.github.io/splunk-otel-collector-chart 2>/dev/null || true
 helm repo update 2>&1 | tail -3
 
-# ── Docker image — try GHCR pull first, fall back to local build ──────────
+# ── Step 4: Docker image — GHCR pull first, local build fallback ──────────
 echo ""
-echo "── Docker image ─────────────────────────────────────────────────────"
+echo "── Step 4: Docker image ─────────────────────────────────────────────"
+
 if docker image inspect "\$AGENT_IMAGE" &>/dev/null; then
-  echo "Image already present locally: \$AGENT_IMAGE"
+  echo "Image already present: \$AGENT_IMAGE"
 elif docker pull "\$GHCR_IMAGE" 2>/dev/null; then
   docker tag "\$GHCR_IMAGE" "\$AGENT_IMAGE"
-  echo "Pulled from GHCR."
+  echo "Pulled from GHCR: \$GHCR_IMAGE"
 else
   echo "Building locally (GHCR not available)..."
-  # Clone any missing sibling repos
-  for repo in auto-detector-provisioner o11y-usage-governance o11y-instrumentation-analyzer splunk-o11y-health-check; do
-    [ -d "\$PARENT_DIR/\$repo" ] || git clone --depth=1 "https://github.com/mqbui1/\$repo" "\$PARENT_DIR/\$repo"
-  done
-  DOCKER_BUILDKIT=0 docker build -t "\$AGENT_IMAGE" -f "\$REPO_DIR/Dockerfile" "\$PARENT_DIR"
+  DOCKER_BUILDKIT=0 docker build \
+    -t "\$AGENT_IMAGE" \
+    -f "\$REPO_DIR/Dockerfile" \
+    "\$PARENT_DIR"
 fi
+
 echo "Importing into k3d cluster '\$CLUSTER_NAME'..."
 k3d image import "\$AGENT_IMAGE" -c "\$CLUSTER_NAME"
 echo "Image ready."
 
-# ── Splunk OTel Collector ─────────────────────────────────────────────────
+# ── Step 5: Splunk OTel Collector ─────────────────────────────────────────
 echo ""
-echo "── Splunk OTel Collector ─────────────────────────────────────────────"
+echo "── Step 5: Splunk OTel Collector ────────────────────────────────────"
 kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install splunk-otel-collector \
   splunk-otel-collector-chart/splunk-otel-collector \
@@ -118,9 +197,9 @@ helm upgrade --install splunk-otel-collector \
   --wait --timeout=5m
 echo "Collector deployed."
 
-# ── Astronomy Shop ────────────────────────────────────────────────────────
+# ── Step 6: Astronomy Shop ────────────────────────────────────────────────
 echo ""
-echo "── Astronomy Shop ───────────────────────────────────────────────────"
+echo "── Step 6: Astronomy Shop ───────────────────────────────────────────"
 kubectl create namespace astronomy-shop --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install astronomy-shop \
   open-telemetry/opentelemetry-demo \
@@ -129,9 +208,9 @@ helm upgrade --install astronomy-shop \
   --wait --timeout=10m
 echo "Astronomy Shop deployed."
 
-# ── o11y-agent ────────────────────────────────────────────────────────────
+# ── Step 7: o11y-agent ────────────────────────────────────────────────────
 echo ""
-echo "── o11y-agent ───────────────────────────────────────────────────────"
+echo "── Step 7: o11y-agent ───────────────────────────────────────────────"
 SESSION_TOKEN_ARG=""
 [ -n "\${AWS_SESSION_TOKEN:-}" ] && SESSION_TOKEN_ARG="--set aws.sessionToken=\${AWS_SESSION_TOKEN}"
 helm upgrade --install o11y-agent \
@@ -151,9 +230,8 @@ helm upgrade --install o11y-agent \
   --wait --timeout=3m
 echo "o11y-agent deployed."
 
-# ── Patch collector to fan out to agent ──────────────────────────────────
-echo ""
-echo "── Patching collector to fan out to o11y-agent ──────────────────────"
+# Patch collector to fan out to agent
+echo "Patching collector → o11y-agent fanout..."
 for i in \$(seq 1 12); do
   kubectl get cm o11y-agent-gateway-patch -n monitoring &>/dev/null && break
   echo "  Waiting for gateway-patch CM... (\$i/12)"
@@ -167,12 +245,12 @@ if [ -n "\$PATCH_VALUES" ]; then
     --namespace monitoring --reuse-values -f - --wait --timeout=3m
   echo "Collector patched."
 else
-  echo "WARNING: gateway-patch CM not found — skipping collector patch."
+  echo "WARNING: gateway-patch CM not found — skipping."
 fi
 
-# ── RUM injector ──────────────────────────────────────────────────────────
+# ── Step 8: RUM injector ──────────────────────────────────────────────────
 echo ""
-echo "── RUM injector ─────────────────────────────────────────────────────"
+echo "── Step 8: RUM injector ─────────────────────────────────────────────"
 sed \
   -e "s/RUM_REALM/\${SPLUNK_REALM}/g" \
   -e "s/RUM_AUTH_TOKEN/\${SPLUNK_ACCESS_TOKEN}/g" \
@@ -186,36 +264,39 @@ echo ""
 echo "================================================================"
 echo "  DEPLOYMENT COMPLETE  \$(date)"
 echo ""
-echo "  Pods:"
 kubectl get pods -n monitoring
-kubectl get pods -n astronomy-shop | head -10
+kubectl get pods -n astronomy-shop | head -15
 echo ""
 echo "  Shop (plain): kubectl port-forward svc/astronomy-shop-frontendproxy 8080:8080 -n astronomy-shop"
 echo "  Shop (RUM):   kubectl port-forward svc/rum-injector 8081:8081 -n astronomy-shop"
 echo "  Agent logs:   kubectl logs -f deployment/o11y-agent -n monitoring"
 echo "================================================================"
 REMOTE_EOF
-)
 
-# ── Upload env file and run script via single SSH connection ──────────────
+# ── Upload script and start in single SSH connection ─────────────────────
 echo ""
-echo "Uploading and starting deploy on ${EC2_HOST}:${EC2_PORT}..."
-echo "(Credentials passed via file, not command-line — fail2ban safe)"
+echo "Uploading run script to ${EC2_HOST}:${EC2_PORT}..."
+sshpass -p "${EC2_PASS}" scp \
+  -o StrictHostKeyChecking=no \
+  -o ConnectTimeout=15 \
+  -P "${EC2_PORT}" \
+  "$TMPSCRIPT" \
+  "splunk@${EC2_HOST}:/tmp/run-deploy.sh"
 
+echo "Starting deploy in tmux session 'deploy'..."
 sshpass -p "${EC2_PASS}" ssh \
   -o StrictHostKeyChecking=no \
   -o ConnectTimeout=15 \
   -o NumberOfPasswordPrompts=1 \
   -p "${EC2_PORT}" \
   "splunk@${EC2_HOST}" \
-  "cat > /tmp/run-deploy.sh && chmod +x /tmp/run-deploy.sh && \
-   tmux kill-session -t deploy 2>/dev/null || true && \
-   tmux new-session -d -s deploy 'bash /tmp/run-deploy.sh' && \
-   echo 'Deploy started in tmux session: deploy'" \
-  <<< "${REMOTE_SCRIPT}"
+  "tmux kill-session -t deploy 2>/dev/null || true; \
+   tmux new-session -d -s deploy 'bash /tmp/run-deploy.sh'; \
+   echo 'Deploy started. Monitor with:'; \
+   echo '  tail -f /tmp/deploy.log'"
 
 echo ""
-echo "Tailing /tmp/deploy.log (Ctrl+C to detach — deploy continues in tmux)..."
+echo "Deploy running on ${EC2_HOST}. Tailing log (Ctrl+C to detach)..."
 echo ""
 sshpass -p "${EC2_PASS}" ssh \
   -o StrictHostKeyChecking=no \
