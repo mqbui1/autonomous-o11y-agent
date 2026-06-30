@@ -11,11 +11,6 @@ grafana:
 opensearch:
   enabled: false
 
-# Load generator lives under components in this chart version
-components:
-  load-generator:
-    enabled: true
-
 # Configure the built-in OTel Collector to export to the Splunk gateway
 opentelemetry-collector:
   config:
