@@ -35,6 +35,8 @@ import agents.detector as detector_agent
 import agents.logs as logs_agent
 import agents.rum as rum_agent
 import agents.rca as rca_agent
+import agents.synthetics as synthetics_agent
+import agents.db as db_agent
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,8 @@ def run_assessment(
         "logs": logs_agent,
         "rum": rum_agent,
         "rca": rca_agent,
+        "synthetics": synthetics_agent,
+        "db": db_agent,
     }
 
     logger.info(
@@ -102,7 +106,7 @@ def run_assessment(
     _run_start = _time.time()
 
     findings: dict[str, SpecialistFindings] = {}
-    with ThreadPoolExecutor(max_workers=7) as pool:
+    with ThreadPoolExecutor(max_workers=9) as pool:
         futures = {
             pool.submit(mod.run, config, state_context): name
             for name, mod in specialists.items()
@@ -229,7 +233,7 @@ def _format_findings_for_synthesis(
         parts.append(cross_domain)
         parts.append("")
 
-    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca"):
+    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db"):
         f = findings.get(domain)
         if not f:
             continue
@@ -282,9 +286,11 @@ def _synthesize(
     from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
     from tools.rum_analyzer import SCHEMAS as R_SCHEMAS, TOOL_FNS as R_FNS
     from tools.rca_tools import SCHEMAS as RCA_SCHEMAS, TOOL_FNS as RCA_FNS
+    from tools.synthetics_tools import SCHEMAS as SYN_SCHEMAS, TOOL_FNS as SYN_FNS
+    from tools.db_tools import SCHEMAS as DB_SCHEMAS, TOOL_FNS as DB_FNS
 
-    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS
-    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS, **RCA_FNS}
+    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS + SYN_SCHEMAS + DB_SCHEMAS
+    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS, **RCA_FNS, **SYN_FNS, **DB_FNS}
 
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
