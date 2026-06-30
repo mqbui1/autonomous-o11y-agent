@@ -11,6 +11,7 @@ SPLUNK_ACCESS_TOKEN="${SPLUNK_ACCESS_TOKEN:?}"
 SPLUNK_ENVIRONMENT="${SPLUNK_ENVIRONMENT:-astronomy-shop-demo}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?}"
+AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
 AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 AGENT_IMAGE="${AGENT_IMAGE:-o11y-agent:latest}"
 
@@ -28,6 +29,7 @@ helm upgrade --install o11y-agent \
   --set splunk.environment="${SPLUNK_ENVIRONMENT}" \
   --set aws.accessKeyId="${AWS_ACCESS_KEY_ID}" \
   --set aws.secretAccessKey="${AWS_SECRET_ACCESS_KEY}" \
+  ${AWS_SESSION_TOKEN:+--set aws.sessionToken="${AWS_SESSION_TOKEN}"} \
   --set aws.region="${AWS_DEFAULT_REGION}" \
   --set image.repository="${AGENT_IMAGE%%:*}" \
   --set image.tag="${AGENT_IMAGE##*:}" \

@@ -12,6 +12,7 @@ aws:
   # Credentials — use existingSecret in production (IRSA recommended on EKS)
   accessKeyId: ""
   secretAccessKey: ""
+  sessionToken: ""          # required for STS/SSO temporary credentials
   existingSecret: ""        # name of existing Secret with keys AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
   # Override model ID (leave empty for default Claude Sonnet 4.6 profile)
   bedrockModelId: ""

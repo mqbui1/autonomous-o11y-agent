@@ -30,7 +30,7 @@ PARENT_DIR="$(cd "$REPO_DIR/.." && pwd)"
 # ── Required env vars ─────────────────────────────────────────────────────────
 : "${SPLUNK_ACCESS_TOKEN:?SPLUNK_ACCESS_TOKEN is required}"
 : "${SPLUNK_REALM:?SPLUNK_REALM is required}"
-: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}"
+: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required (export from: aws configure export-credentials --format env)}"
 : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}"
 
 SPLUNK_ENVIRONMENT="${SPLUNK_ENVIRONMENT:-astronomy-shop-demo}"

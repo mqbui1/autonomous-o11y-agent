@@ -69,6 +69,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "o11y-agent.awsSecretName" . }}
                   key: AWS_SECRET_ACCESS_KEY
+            {{- if .Values.aws.sessionToken }}
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "o11y-agent.awsSecretName" . }}
+                  key: AWS_SESSION_TOKEN
+            {{- end }}
             - name: AWS_DEFAULT_REGION
               value: {{ .Values.aws.region | quote }}
             {{- if .Values.aws.bedrockModelId }}
