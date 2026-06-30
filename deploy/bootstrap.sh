@@ -19,6 +19,8 @@ set -euo pipefail
 EC2_PASS="${EC2_PASS:-Sp1unkH00di3}"
 EC2_PORT="${EC2_PORT:-2222}"
 SPLUNK_ENVIRONMENT="${SPLUNK_ENVIRONMENT:-astronomy-shop-demo}"
+# Optional: path to pre-built linux/amd64 image tar (skips Docker build on EC2)
+AGENT_IMAGE_TAR="${AGENT_IMAGE_TAR:-/tmp/o11y-agent.tar}"
 
 # ── Export AWS creds from current SSO session ─────────────────────────────
 echo "Exporting AWS credentials from SSO session..."
@@ -178,11 +180,15 @@ echo "── Step 4: Docker image ───────────────�
 
 if docker image inspect "\$AGENT_IMAGE" &>/dev/null; then
   echo "Image already present: \$AGENT_IMAGE"
+elif [ -f /tmp/o11y-agent.tar ] && [ -s /tmp/o11y-agent.tar ]; then
+  echo "Loading pre-built image from uploaded tar..."
+  docker load < /tmp/o11y-agent.tar
+  docker tag o11y-agent:latest "\$AGENT_IMAGE" 2>/dev/null || true
 elif docker pull "\$GHCR_IMAGE" 2>/dev/null; then
   docker tag "\$GHCR_IMAGE" "\$AGENT_IMAGE"
   echo "Pulled from GHCR: \$GHCR_IMAGE"
 else
-  echo "Building locally (GHCR not available)..."
+  echo "Building locally (no pre-built tar, GHCR not available)..."
   DOCKER_BUILDKIT=0 docker build \
     -t "\$AGENT_IMAGE" \
     -f "\$REPO_DIR/Dockerfile" \
@@ -284,15 +290,29 @@ echo "  Agent logs:   kubectl logs -f deployment/o11y-agent -n monitoring"
 echo "================================================================"
 REMOTE_EOF
 
-# ── Upload script and start in single SSH connection ─────────────────────
+# ── Upload script (and optional pre-built image) ─────────────────────────
 echo ""
 echo "Uploading run script to ${EC2_HOST}:${EC2_PORT}..."
 sshpass -p "${EC2_PASS}" scp \
   -o StrictHostKeyChecking=no \
-  -o ConnectTimeout=15 \
+  -o ConnectTimeout=30 \
   -P "${EC2_PORT}" \
   "$TMPSCRIPT" \
   "splunk@${EC2_HOST}:/tmp/run-deploy.sh"
+
+# Upload pre-built image tar if it exists — avoids Docker build on EC2
+if [ -f "${AGENT_IMAGE_TAR}" ] && [ -s "${AGENT_IMAGE_TAR}" ]; then
+  echo "Uploading pre-built image tar ($(du -sh "${AGENT_IMAGE_TAR}" | cut -f1))..."
+  sshpass -p "${EC2_PASS}" scp \
+    -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=30 \
+    -P "${EC2_PORT}" \
+    "${AGENT_IMAGE_TAR}" \
+    "splunk@${EC2_HOST}:/tmp/o11y-agent.tar"
+  echo "Image tar uploaded."
+else
+  echo "No pre-built image tar found at ${AGENT_IMAGE_TAR} — EC2 will build locally."
+fi
 
 echo "Starting deploy in tmux session 'deploy'..."
 sshpass -p "${EC2_PASS}" ssh \
