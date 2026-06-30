@@ -13,7 +13,8 @@ import logging
 from typing import Callable
 
 from config import AgentConfig
-from .alerts import AlertDispatcher
+from .alerts import AlertDispatcher, StreamingAlert
+from .observations import ObservationBuffer, Observation
 from .pii_scanner import PIIScanner
 from .attribute_checker import AttributeChecker
 from .cardinality_tracker import CardinalityTracker
@@ -49,6 +50,35 @@ class StreamingPipeline:
         self.attribute_checker = attribute_checker
         self.cardinality_tracker = cardinality_tracker
         self.service_tracker = service_tracker
+        self._obs_buffer: ObservationBuffer | None = None
+
+    def set_observation_buffer(self, buf: ObservationBuffer):
+        """Attach an ObservationBuffer so detectors write events for batch consumption."""
+        self._obs_buffer = buf
+        # Patch detector callbacks to also write to the buffer
+        self._patch_dispatcher(buf)
+
+    def _patch_dispatcher(self, buf: ObservationBuffer):
+        """Wrap AlertDispatcher.fire() to mirror alerts into the observation buffer."""
+        original_fire = self.dispatcher.fire
+
+        def fire_and_record(alert: StreamingAlert):
+            original_fire(alert)
+            obs_type = {
+                "pii_scanner": "pii",
+                "attribute_checker": "attribute_gap",
+                "cardinality_tracker": "cardinality_spike",
+                "new_service": "new_service",
+            }.get(alert.detector)
+            if obs_type:
+                buf.add(Observation(
+                    type=obs_type,
+                    service=alert.service,
+                    detail=alert.detail[:200],
+                    severity=alert.severity,
+                ))
+
+        self.dispatcher.fire = fire_and_record
 
     @classmethod
     def from_config(cls, config: AgentConfig) -> "StreamingPipeline":

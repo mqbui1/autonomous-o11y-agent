@@ -1,90 +1,95 @@
 """
-Bedrock Converse API tool-calling loop.
+LLM tool-calling loop — provider-agnostic.
 
-Replaces Strands with direct boto3 calls. When Claude returns multiple
-tool_use blocks in a single turn, all are executed concurrently via
-ThreadPoolExecutor — eliminating the sequential bottleneck.
+Supports AWS Bedrock and any OpenAI-compatible endpoint (Luna, Azure, Vertex, Ollama).
+Provider is selected via AgentConfig.llm_provider ("bedrock" | "openai").
+
+When the model returns multiple tool_use blocks in a single turn, all are
+executed concurrently via ThreadPoolExecutor.
 """
 
 import logging
-import boto3
-from botocore.config import Config
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
-
-_BEDROCK_CONFIG = Config(read_timeout=600, connect_timeout=10, retries={"max_attempts": 2})
 
 logger = logging.getLogger(__name__)
 
 
 def run_agent(
-    model_id: str,
-    region: str,
     system_prompt: str,
     tools: list[dict],
     tool_fns: dict[str, Callable],
     initial_message: str,
+    provider=None,
+    # Legacy kwargs kept for backward compatibility
+    model_id: str = None,
+    region: str = None,
     max_turns: int = 30,
 ) -> str:
     """
-    Run a tool-calling loop against Bedrock Claude.
+    Run a tool-calling loop against any supported LLM provider.
 
-    When Claude returns multiple tool_use blocks in one turn, all are
-    executed concurrently. Returns the final text response.
+    provider: an LLMProvider instance. If None, a BedrockProvider is created
+              using model_id and region (backward-compatible path).
     """
-    client = boto3.client("bedrock-runtime", region_name=region, config=_BEDROCK_CONFIG)
+    if provider is None:
+        from providers.bedrock import BedrockProvider
+        from botocore.config import Config
+        provider = BedrockProvider(model_id=model_id, region=region)
+
     messages = [{"role": "user", "content": [{"text": initial_message}]}]
+    native_tools = provider.convert_tools(tools)
 
     for turn in range(max_turns):
-        kwargs: dict = dict(
-            modelId=model_id,
-            system=[{"text": system_prompt}],
+        result = provider.converse(
+            system_prompt=system_prompt,
             messages=messages,
+            tools=native_tools,
         )
-        if tools:
-            kwargs["toolConfig"] = {"tools": tools}
+        stop_reason = result["stop_reason"]
 
-        response = client.converse(**kwargs)
-        stop_reason = response["stopReason"]
-        output_msg = response["output"]["message"]
-        messages.append(output_msg)
+        # Append the assistant turn to history
+        raw = result["raw_message"]
+        # Normalise to Bedrock message shape for history
+        if hasattr(raw, "model_dump"):
+            # OpenAI response object — convert to Bedrock-like dict for history
+            messages.append({"role": "assistant", "content": [{"text": result["text"]}]} if stop_reason == "end_turn"
+                            else _openai_msg_to_bedrock(result))
+        else:
+            messages.append(raw)
 
-        logger.debug("Turn %d: stopReason=%s", turn + 1, stop_reason)
+        logger.debug("Turn %d: stop_reason=%s", turn + 1, stop_reason)
 
         if stop_reason == "end_turn":
-            return "\n".join(
-                b["text"] for b in output_msg["content"] if "text" in b
-            )
+            return result["text"]
 
         if stop_reason == "tool_use":
-            tool_uses = [
-                b["toolUse"] for b in output_msg["content"] if "toolUse" in b
-            ]
+            tool_uses = result["tool_uses"]
             logger.info(
                 "Turn %d: executing %d tool(s) in parallel: %s",
                 turn + 1,
                 len(tool_uses),
                 [t["name"] for t in tool_uses],
             )
-            results = _execute_parallel(tool_uses, tool_fns)
+            results = _execute_parallel(tool_uses, tool_fns, provider)
             messages.append({"role": "user", "content": results})
             continue
 
-        logger.warning("Unexpected stop reason: %s — stopping", stop_reason)
+        logger.warning("Unexpected stop_reason: %s — stopping", stop_reason)
         break
 
     return "Agent reached max turns without completing."
 
 
 def _execute_parallel(
-    tool_uses: list[dict], tool_fns: dict[str, Callable]
+    tool_uses: list[dict], tool_fns: dict[str, Callable], provider
 ) -> list[dict]:
     """Execute tool calls concurrently; return toolResult content blocks."""
     id_to_result: dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=len(tool_uses)) as pool:
         futures = {
-            pool.submit(_invoke, tool_fns, tu["name"], tu.get("input", {})): tu["toolUseId"]
+            pool.submit(_invoke, tool_fns, tu["name"], tu.get("input", {})): tu["id"]
             for tu in tool_uses
         }
         for future in as_completed(futures):
@@ -95,7 +100,7 @@ def _execute_parallel(
                 id_to_result[tool_use_id] = f"Tool execution error: {exc}"
 
     return [
-        {"toolResult": {"toolUseId": tid, "content": [{"text": text}]}}
+        provider.format_tool_result(tid, text)
         for tid, text in id_to_result.items()
     ]
 
@@ -109,3 +114,17 @@ def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
         return f"Tool {name} error: {exc}"
+
+
+def _openai_msg_to_bedrock(result: dict) -> dict:
+    """Convert an OpenAI tool_use result into a Bedrock-compatible history entry."""
+    content = []
+    for tu in result.get("tool_uses", []):
+        content.append({
+            "toolUse": {
+                "toolUseId": tu["id"],
+                "name": tu["name"],
+                "input": tu.get("input", {}),
+            }
+        })
+    return {"role": "assistant", "content": content}

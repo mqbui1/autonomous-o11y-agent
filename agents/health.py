@@ -2,6 +2,7 @@
 
 from config import AgentConfig
 from agent_loop import run_agent
+from providers import get_provider
 from tools.health_check import SCHEMAS, TOOL_FNS
 from tools.findings import SUBMIT_SCHEMA, SpecialistFindings, make_submit_fn
 
@@ -41,8 +42,7 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
 
     prompt = f"{state_context}\n\n---\n\n{_TASK}" if state_context else _TASK
     raw_text = run_agent(
-        model_id=config.bedrock_model_id,
-        region=config.aws_region,
+        provider=get_provider(config),
         system_prompt=_SYSTEM,
         tools=all_schemas,
         tool_fns=all_tool_fns,

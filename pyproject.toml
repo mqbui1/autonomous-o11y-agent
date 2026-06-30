@@ -13,6 +13,20 @@ dependencies = [
     "werkzeug>=3.0.0",
 ]
 
+[project.optional-dependencies]
+openai = [
+    "openai>=1.0.0",
+]
+observability = [
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+all = [
+    "openai>=1.0.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+
 [project.scripts]
 o11y-agent = "main:main"
 

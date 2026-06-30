@@ -28,12 +28,12 @@ class RunRecord:
     detector_count: int
     cardinality_issues: int
     # Named lists — used for feedback loop (Gap 7)
+    active_service_names: list[str] = field(default_factory=list)
     silent_service_names: list[str] = field(default_factory=list)
     deployed_detector_ids: list[str] = field(default_factory=list)
     critical_issues: list[str] = field(default_factory=list)   # issue descriptions
-    # Legacy / general
+    actions_taken: list[str] = field(default_factory=list)     # audit trail
     top_findings: list[str] = field(default_factory=list)
-    actions_taken: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +83,10 @@ class EnvironmentState:
             lines.append("\n**Critical issues from last run (confirm if resolved):**")
             for issue in last.critical_issues[:5]:
                 lines.append(f"  - {issue}")
+        if last.actions_taken:
+            lines.append("\n**Actions taken last run (verify they held):**")
+            for action in last.actions_taken[:8]:
+                lines.append(f"  - {action}")
 
         # Score trend
         if len(self.runs) >= 2:
@@ -167,14 +171,15 @@ def build_run_record(
 
     # Silent / active service counts + names
     silent_names: list[str] = []
-    active_count = 0
-    silent_count = 0
+    active_names: list[str] = []
     for f in findings.values():
         if hasattr(f, "services_silent"):
             silent_names.extend(f.services_silent)
         if hasattr(f, "services_active"):
-            active_count = max(active_count, len(f.services_active))
+            active_names.extend(f.services_active)
     silent_names = list(dict.fromkeys(silent_names))  # deduplicate, preserve order
+    active_names = list(dict.fromkeys(active_names))
+    active_count = len(active_names)
     silent_count = len(silent_names)
 
     # Deployed detector IDs (Gap 7 feedback loop)
@@ -200,16 +205,23 @@ def build_run_record(
                     svc = f" [{issue.service}]" if issue.service else ""
                     critical_issues.append(f"[{f.domain}]{svc} {issue.description}")
 
+    # Audit trail — collect actions actually taken across all specialists
+    all_actions: list[str] = []
+    for f in findings.values():
+        if hasattr(f, "actions_taken"):
+            all_actions.extend(f.actions_taken)
+
     return RunRecord(
         timestamp=datetime.now(timezone.utc).isoformat(),
         instrumentation_score=score,
         services_active=active_count,
         services_silent=silent_count,
+        active_service_names=active_names,
         silent_service_names=silent_names,
         detector_count=detector_count,
         deployed_detector_ids=deployed_ids,
         cardinality_issues=cardinality_issues,
         critical_issues=critical_issues,
+        actions_taken=all_actions,
         top_findings=[f.summary for f in findings.values() if hasattr(f, "summary")],
-        actions_taken=[],
     )
