@@ -342,12 +342,14 @@ sshpass -p "${EC2_PASS}" ssh \
    echo '  tail -f /tmp/deploy.log'"
 
 echo ""
-echo "Deploy running on ${EC2_HOST}. Tailing log (Ctrl+C to detach)..."
+echo "Deploy started in tmux session 'deploy' on ${EC2_HOST}."
 echo ""
-sshpass -p "${EC2_PASS}" ssh \
-  -o StrictHostKeyChecking=no \
-  -o ConnectTimeout=15 \
-  -o NumberOfPasswordPrompts=1 \
-  -p "${EC2_PORT}" \
-  "splunk@${EC2_HOST}" \
-  'tail -f /tmp/deploy.log'
+echo "Monitor progress (poll every 5 min — don't hold a persistent connection):"
+echo "  while true; do"
+echo "    sshpass -p '${EC2_PASS}' ssh -o StrictHostKeyChecking=no -o NumberOfPasswordPrompts=1 -p ${EC2_PORT} splunk@${EC2_HOST} 'tail -20 /tmp/deploy.log 2>/dev/null'"
+echo "    sleep 300"
+echo "  done"
+echo ""
+echo "Or attach to tmux (after deploy is done):"
+echo "  sshpass -p '${EC2_PASS}' ssh -p ${EC2_PORT} splunk@${EC2_HOST}"
+echo "  tmux attach -t deploy"
