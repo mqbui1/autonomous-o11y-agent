@@ -95,14 +95,36 @@ def create_app(pipeline: "StreamingPipeline") -> Flask:
     return app
 
 
+_protobuf_warned = False
+
+
 def _parse_body() -> dict | None:
-    """Parse JSON body, accepting both application/json and application/x-protobuf."""
+    """
+    Parse OTLP/HTTP body. Only JSON is supported.
+
+    Production gateways default to protobuf encoding. To ensure this receiver
+    gets parseable data, add `encoding: json` to the otlp/http exporter in your
+    gateway config (already included in the gateway-patch-configmap.yaml Helm template).
+    """
+    global _protobuf_warned
     try:
         ct = request.content_type or ""
         if "json" in ct or not ct:
             return request.get_json(force=True, silent=True)
-        # protobuf not supported — log and return empty success
-        logger.debug("Received non-JSON content-type: %s — skipping", ct)
+        if "protobuf" in ct or "octet-stream" in ct:
+            if not _protobuf_warned:
+                logger.warning(
+                    "OTLP receiver received protobuf-encoded payload (content-type: %s). "
+                    "This receiver only supports JSON encoding. "
+                    "Add 'encoding: json' to your gateway otlp/http exporter config — "
+                    "see the gateway-patch-configmap.yaml for the correct snippet. "
+                    "Telemetry will NOT be processed until encoding is switched to JSON. "
+                    "(This warning logs once per process.)",
+                    ct,
+                )
+                _protobuf_warned = True
+            return {}  # return empty success so gateway doesn't retry
+        logger.debug("Received unrecognised content-type: %s — skipping", ct)
         return {}
     except Exception as exc:
         logger.warning("Failed to parse request body: %s", exc)

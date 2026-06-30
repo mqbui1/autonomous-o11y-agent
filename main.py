@@ -134,6 +134,9 @@ def main():
 
     agent = build_agent(config)
 
+    from observability.self_monitor import SelfMonitor
+    monitor = SelfMonitor.from_config(config)
+
     if args.streaming or args.streaming_only:
         _run_streaming(agent, config, args)
         return  # streaming mode runs until killed
@@ -143,9 +146,11 @@ def main():
             agent=agent,
             config=config,
             interval_minutes=args.interval,
+            monitor=monitor,
+            enable_approval=not config.auto_apply,
         )
     else:
-        output = run_once(agent, config, prompt=args.prompt)
+        output = run_once(agent, config, prompt=args.prompt, monitor=monitor)
 
         print("\n" + "="*70)
         print("  AUTONOMOUS O11Y AGENT ASSESSMENT")
@@ -172,7 +177,22 @@ def _run_streaming(agent, config, args):
         config.streaming_port,
     )
 
+    from streaming.observations import ObservationBuffer
+    from state import load_state
+
     pipeline = StreamingPipeline.from_config(config)
+    obs_buffer = ObservationBuffer(retention_minutes=120)
+    pipeline.set_observation_buffer(obs_buffer)
+
+    # Seed service tracker from last known state so existing services don't
+    # trigger new-service provisioning callbacks on every restart.
+    state = load_state(config.environment)
+    if state.runs:
+        last = state.last_run()
+        known = list(last.active_service_names) + list(last.silent_service_names)
+        if known:
+            pipeline.service_tracker.seed(known)
+            logger.info("Seeded service tracker with %d known services from state", len(known))
 
     # Register new-service callback: trigger detector provisioning
     def on_new_service(service: str):
@@ -208,10 +228,13 @@ def _run_streaming(agent, config, args):
         run_count += 1
         logger.info("[Batch run %d] Starting assessment", run_count)
         try:
-            output = agent(config, prompt=args.prompt)
-            # Seed service tracker with known services after each batch run
-            # so existing services don't trigger new-service callbacks
-            from agents.coordinator import _cross_domain_analysis
+            output = agent(config, prompt=args.prompt, observation_buffer=obs_buffer)
+            # Re-seed service tracker after each batch run with updated service list
+            updated_state = load_state(config.environment)
+            if updated_state.runs:
+                last = updated_state.last_run()
+                known = list(last.active_service_names) + list(last.silent_service_names)
+                pipeline.service_tracker.seed(known)
         except Exception as exc:
             logger.error("[Batch run %d] Failed: %s", run_count, exc)
             output = f"[Assessment failed]: {exc}"

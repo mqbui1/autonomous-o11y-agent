@@ -19,12 +19,14 @@ from datetime import datetime, timezone
 
 from config import AgentConfig
 from agent_loop import run_agent
+from providers import get_provider
 from state import load_state, save_state, build_run_record
 from tools.findings import SpecialistFindings
 import agents.health as health_agent
 import agents.instrumentation as instrumentation_agent
 import agents.governance as governance_agent
 import agents.detector as detector_agent
+import agents.logs as logs_agent
 
 logger = logging.getLogger(__name__)
 
@@ -50,19 +52,28 @@ Lead with the highest-impact findings. Be specific — vague recommendations hav
 """
 
 
-def run_assessment(config: AgentConfig, prompt: str = None) -> str:
+def run_assessment(config: AgentConfig, prompt: str = None, observation_buffer=None) -> str:
     """
     Run all four specialist agents in parallel, perform cross-domain analysis,
     synthesize with full tool access, and persist structured state.
+
+    observation_buffer: optional streaming.observations.ObservationBuffer — when
+    running in streaming mode, recent streaming observations are injected into the
+    synthesis prompt so batch and streaming context are unified.
     """
     state = load_state(config.environment)
     state_context = state.trend_context()
+    if observation_buffer is not None:
+        streaming_context = observation_buffer.summarize(window_minutes=60)
+        if streaming_context:
+            state_context = (state_context + "\n\n" + streaming_context).strip()
 
     specialists = {
         "health": health_agent,
         "instrumentation": instrumentation_agent,
         "governance": governance_agent,
         "detector": detector_agent,
+        "logs": logs_agent,
     }
 
     logger.info(
@@ -80,8 +91,15 @@ def run_assessment(config: AgentConfig, prompt: str = None) -> str:
         for future in as_completed(futures):
             name = futures[future]
             try:
-                findings[name] = future.result()
+                findings[name] = future.result(timeout=config.specialist_timeout)
                 logger.info("Specialist '%s' complete", name)
+            except TimeoutError:
+                findings[name] = SpecialistFindings(
+                    domain=name,
+                    summary=f"[{name} specialist timed out after {config.specialist_timeout}s]",
+                    raw_text="timeout",
+                )
+                logger.error("Specialist '%s' timed out after %ds", name, config.specialist_timeout)
             except Exception as exc:
                 findings[name] = SpecialistFindings(
                     domain=name,
@@ -184,7 +202,7 @@ def _format_findings_for_synthesis(
         parts.append(cross_domain)
         parts.append("")
 
-    for domain in ("health", "instrumentation", "governance", "detector"):
+    for domain in ("health", "instrumentation", "governance", "detector", "logs"):
         f = findings.get(domain)
         if not f:
             continue
@@ -234,16 +252,16 @@ def _synthesize(
     from tools.analyzer import SCHEMAS as A_SCHEMAS, TOOL_FNS as A_FNS
     from tools.governance import SCHEMAS as G_SCHEMAS, TOOL_FNS as G_FNS
     from tools.provisioner import SCHEMAS as P_SCHEMAS, TOOL_FNS as P_FNS
+    from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
 
-    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS
-    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS}
+    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS
+    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS}
 
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
 
     return run_agent(
-        model_id=config.bedrock_model_id,
-        region=config.aws_region,
+        provider=get_provider(config),
         system_prompt=system,
         tools=all_schemas,
         tool_fns=all_fns,

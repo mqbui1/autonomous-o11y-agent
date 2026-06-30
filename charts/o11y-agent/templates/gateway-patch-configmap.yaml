@@ -34,6 +34,7 @@ data:
         exporters:
           otlp/o11y_agent:
             endpoint: "http://{{ include "o11y-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.receiver.port }}"
+            encoding: json      # REQUIRED — receiver parses JSON only, not protobuf
             tls:
               insecure: true
             sending_queue:
@@ -63,6 +64,7 @@ data:
     exporters:
       otlp/o11y_agent:
         endpoint: "http://{{ include "o11y-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.receiver.port }}"
+        encoding: json      # REQUIRED — receiver parses JSON only, not protobuf
         tls:
           insecure: true
         sending_queue:

@@ -47,6 +47,24 @@ class AgentConfig:
     subprocess_timeout: int = field(
         default_factory=lambda: int(os.environ.get("TOOL_TIMEOUT", "300"))
     )
+    specialist_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("SPECIALIST_TIMEOUT", "900"))
+    )
+
+    # ── LLM provider (Gap 6 — provider abstraction) ───────────────────────────
+    # "bedrock" (default) or "openai" (any OpenAI-compatible endpoint: Luna, Azure, Vertex, Ollama)
+    llm_provider: str = field(
+        default_factory=lambda: os.environ.get("LLM_PROVIDER", "bedrock")
+    )
+    openai_base_url: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_BASE_URL", "")
+    )
+    openai_api_key: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_API_KEY", "")
+    )
+    openai_model: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_MODEL", "")
+    )
 
     # ── Streaming mode (gateway co-deployment) ────────────────────────────────
     streaming_port: int = field(

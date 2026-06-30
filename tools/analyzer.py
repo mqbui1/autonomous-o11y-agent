@@ -5,11 +5,9 @@ Instrumentation analyzer tool — wraps o11y-instrumentation-analyzer/analyze.py
 import json
 import tempfile
 from pathlib import Path
-from strands import tool
 from ._runner import get_config, run, summarise
 
 
-@tool
 def analyze_instrumentation(
     service: str = "",
     lookback_hours: int = 3,
@@ -68,3 +66,40 @@ def analyze_instrumentation(
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "analyze_instrumentation")
+
+
+SCHEMAS = [
+    {
+        "toolSpec": {
+            "name": "analyze_instrumentation",
+            "description": (
+                "Analyze APM spans, infrastructure metrics, and logs for missing attributes "
+                "that break Related Content, Service Centric View, and trace-log correlation. "
+                "Returns a 0–100 health score per signal type with specific gaps identified."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Scope to a specific service. Leave empty for all.",
+                        },
+                        "lookback_hours": {
+                            "type": "integer",
+                            "description": "Hours of recent telemetry to sample (default: 3)",
+                        },
+                        "skip_logs": {
+                            "type": "boolean",
+                            "description": "If true, skip log analysis (faster when logs not configured)",
+                        },
+                    },
+                }
+            },
+        }
+    },
+]
+
+TOOL_FNS = {
+    "analyze_instrumentation": analyze_instrumentation,
+}

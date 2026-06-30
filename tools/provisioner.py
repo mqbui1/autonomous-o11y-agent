@@ -2,11 +2,9 @@
 Detector provisioner tool — wraps auto-detector-provisioner/provision.py.
 """
 
-from strands import tool
 from ._runner import get_config, run, summarise
 
 
-@tool
 def provision_detectors(
     auto_deploy: bool = False,
     service: str = "",
@@ -59,7 +57,6 @@ def provision_detectors(
     return summarise(rc, stdout, stderr, "provision_detectors")
 
 
-@tool
 def retune_detectors(service: str = "") -> str:
     """
     Recompute baselines from recent telemetry and update existing detector thresholds
@@ -86,7 +83,6 @@ def retune_detectors(service: str = "") -> str:
     return summarise(rc, stdout, stderr, "retune_detectors")
 
 
-@tool
 def audit_detectors(service: str = "") -> str:
     """
     Audit deployed detectors for effectiveness. Identifies detectors that have never
@@ -109,3 +105,91 @@ def audit_detectors(service: str = "") -> str:
 
     rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path)
     return summarise(rc, stdout, stderr, "audit_detectors")
+
+
+SCHEMAS = [
+    {
+        "toolSpec": {
+            "name": "provision_detectors",
+            "description": (
+                "Discover services in the configured environment, learn behavioral baselines "
+                "from live telemetry, and provision best-practice detectors tuned to actual "
+                "behavior. Supports JVM, Python, Node.js, Go, .NET, Rust, GenAI/agentic, "
+                "Kubernetes, Istio, Redis, PostgreSQL, and 30+ other stacks."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "auto_deploy": {
+                            "type": "boolean",
+                            "description": "If true, deploy to Splunk. If false, dry-run only.",
+                        },
+                        "service": {
+                            "type": "string",
+                            "description": "Scope to a specific service. Leave empty for all.",
+                        },
+                        "skip_baseline": {
+                            "type": "boolean",
+                            "description": "If true, use fixed industry thresholds instead of learned baselines.",
+                        },
+                        "baseline_window_hours": {
+                            "type": "integer",
+                            "description": "Hours of history for baseline learning (default: 168 = 7 days).",
+                        },
+                        "reconcile": {
+                            "type": "boolean",
+                            "description": "If true, update changed detectors in-place instead of recreating.",
+                        },
+                    },
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "retune_detectors",
+            "description": (
+                "Recompute baselines from recent telemetry and update existing detector "
+                "thresholds. Use when detectors are too noisy or missing real incidents."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Scope to a specific service. Leave empty for all.",
+                        }
+                    },
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "audit_detectors",
+            "description": (
+                "Audit deployed detectors for effectiveness. Identifies never-fired and "
+                "excessively noisy detectors for the configured environment."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": "Scope to a specific service. Leave empty for all.",
+                        }
+                    },
+                }
+            },
+        }
+    },
+]
+
+TOOL_FNS = {
+    "provision_detectors": provision_detectors,
+    "retune_detectors": retune_detectors,
+    "audit_detectors": audit_detectors,
+}

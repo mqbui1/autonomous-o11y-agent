@@ -35,6 +35,7 @@ class SpecialistFindings:
     #   governance    → {"top_cardinality_mts": int, "anomaly_count": int, "top_metrics": [str]}
     #   detector      → {"deployed_count": int, "dark_service_count": int, "deployed_ids": [str]}
     metrics: dict[str, Any] = field(default_factory=dict)
+    actions_taken: list[str] = field(default_factory=list)  # audit trail of changes made
     raw_text: str = ""   # full prose from run_agent preserved here
 
 
@@ -99,6 +100,16 @@ SUBMIT_SCHEMA = {
                             "detector → {deployed_count, dark_service_count, deployed_ids}"
                         ),
                     },
+                    "actions_taken": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Audit trail of changes actually made this run. "
+                            "Examples: 'Deployed detector HxYZ for payment-service (error rate p95)', "
+                            "'Applied drop rule for k8s.pod.uid in http.server.duration'. "
+                            "Leave empty for dry-run / recommendation-only runs."
+                        ),
+                    },
                 },
             }
         },
@@ -119,6 +130,7 @@ def make_submit_fn(collector: dict, domain: str):
         services_silent: list = None,
         instrumentation_score: int = None,
         metrics: dict = None,
+        actions_taken: list = None,
     ) -> str:
         parsed_issues = [
             Issue(**i) if isinstance(i, dict) else i for i in (issues or [])
@@ -131,6 +143,7 @@ def make_submit_fn(collector: dict, domain: str):
             instrumentation_score=instrumentation_score,
             issues=parsed_issues,
             metrics=metrics or {},
+            actions_taken=actions_taken or [],
         )
         return "Findings recorded. Assessment complete."
 
