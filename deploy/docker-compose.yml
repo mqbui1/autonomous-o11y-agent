@@ -31,10 +31,6 @@ services:
   otel-collector:
     image: quay.io/signalfx/splunk-otel-collector:latest
     container_name: otel-collector
-    deploy:
-      resources:
-        limits:
-          memory: 256M
     restart: unless-stopped
     command: ["--config=/etc/otel/otelcol-config.yml"]
     user: "0:0"
@@ -65,10 +61,6 @@ services:
       dockerfile: deploy/Dockerfile.agent
     container_name: o11y-agent
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 512M
     ports:
       - "4319:4318"    # OTLP receiver (4319 on host to avoid conflict with collector)
     environment:
@@ -106,10 +98,6 @@ services:
   accounting:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-accounting
     container_name: accounting
-    deploy:
-      resources:
-        limits:
-          memory: 120M
     restart: unless-stopped
     environment:
       - KAFKA_ADDR=kafka:9092
@@ -127,10 +115,6 @@ services:
   ad:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-ad
     container_name: ad
-    deploy:
-      resources:
-        limits:
-          memory: 300M
     restart: unless-stopped
     ports:
       - "9555"
@@ -153,10 +137,6 @@ services:
   cart:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-cart
     container_name: cart
-    deploy:
-      resources:
-        limits:
-          memory: 160M
     restart: unless-stopped
     ports:
       - "7070"
@@ -179,10 +159,6 @@ services:
   checkout:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-checkout
     container_name: checkout
-    deploy:
-      resources:
-        limits:
-          memory: 20M
     restart: unless-stopped
     ports:
       - "5050"
@@ -220,10 +196,6 @@ services:
   currency:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-currency
     container_name: currency
-    deploy:
-      resources:
-        limits:
-          memory: 20M
     restart: unless-stopped
     ports:
       - "7001"
@@ -239,10 +211,6 @@ services:
   email:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-email
     container_name: email
-    deploy:
-      resources:
-        limits:
-          memory: 100M
     restart: unless-stopped
     ports:
       - "6060"
@@ -260,10 +228,6 @@ services:
   fraud-detection:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-fraud-detection
     container_name: fraud-detection
-    deploy:
-      resources:
-        limits:
-          memory: 200M
     restart: unless-stopped
     environment:
       - FLAGD_HOST=flagd
@@ -284,10 +248,6 @@ services:
   frontend:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-frontend
     container_name: frontend
-    deploy:
-      resources:
-        limits:
-          memory: 250M
     restart: unless-stopped
     ports:
       - "8080"
@@ -335,10 +295,6 @@ services:
   frontend-proxy:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-frontend-proxy
     container_name: frontend-proxy
-    deploy:
-      resources:
-        limits:
-          memory: 65M
     restart: unless-stopped
     ports:
       - "8080:8080"    # Main demo UI — open http://localhost:8080
@@ -379,10 +335,6 @@ services:
   image-provider:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-image-provider
     container_name: image-provider
-    deploy:
-      resources:
-        limits:
-          memory: 120M
     restart: unless-stopped
     ports:
       - "8081"
@@ -400,10 +352,6 @@ services:
   load-generator:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-load-generator
     container_name: load-generator
-    deploy:
-      resources:
-        limits:
-          memory: 120M
     restart: unless-stopped
     ports:
       - "8089:8089"    # Locust UI — open http://localhost:8089
@@ -432,10 +380,6 @@ services:
   payment:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-payment
     container_name: payment
-    deploy:
-      resources:
-        limits:
-          memory: 120M
     restart: unless-stopped
     ports:
       - "50051"
@@ -457,10 +401,6 @@ services:
   product-catalog:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-product-catalog
     container_name: product-catalog
-    deploy:
-      resources:
-        limits:
-          memory: 20M
     restart: unless-stopped
     ports:
       - "3550"
@@ -481,10 +421,6 @@ services:
   quote:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-quote
     container_name: quote
-    deploy:
-      resources:
-        limits:
-          memory: 40M
     restart: unless-stopped
     ports:
       - "8090"
@@ -503,10 +439,6 @@ services:
   recommendation:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-recommendation
     container_name: recommendation
-    deploy:
-      resources:
-        limits:
-          memory: 50M
     restart: unless-stopped
     ports:
       - "9001"
@@ -531,10 +463,6 @@ services:
   shipping:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-shipping
     container_name: shipping
-    deploy:
-      resources:
-        limits:
-          memory: 20M
     restart: unless-stopped
     ports:
       - "50050"
@@ -556,10 +484,6 @@ services:
   flagd:
     image: ghcr.io/open-feature/flagd:v0.12.1
     container_name: flagd
-    deploy:
-      resources:
-        limits:
-          memory: 75M
     restart: unless-stopped
     environment:
       - FLAGD_OTEL_COLLECTOR_URI=otel-collector:4317
@@ -577,10 +501,6 @@ services:
     image: valkey/valkey:8.1-alpine
     container_name: valkey-cart
     user: valkey
-    deploy:
-      resources:
-        limits:
-          memory: 20M
     restart: unless-stopped
     ports:
       - "6379"
@@ -589,10 +509,6 @@ services:
   kafka:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-kafka
     container_name: kafka
-    deploy:
-      resources:
-        limits:
-          memory: 600M
     restart: unless-stopped
     environment:
       - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
@@ -621,10 +537,6 @@ services:
     command:
       - "--memory.max-traces=500"
       - "--query.base-path=/jaeger/ui"
-    deploy:
-      resources:
-        limits:
-          memory: 200M
     restart: unless-stopped
     ports:
       - "16686"
@@ -635,10 +547,6 @@ services:
   grafana:
     image: grafana/grafana:11.5.2
     container_name: grafana
-    deploy:
-      resources:
-        limits:
-          memory: 100M
     restart: unless-stopped
     ports:
       - "3000"
