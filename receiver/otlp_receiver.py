@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def create_app(pipeline: "StreamingPipeline") -> Flask:
+def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
     app = Flask(__name__)
     app.logger.setLevel(logging.WARNING)   # suppress Flask access log noise
 
@@ -106,6 +106,50 @@ def create_app(pipeline: "StreamingPipeline") -> Flask:
     def healthz():
         return Response("ok", status=200)
 
+    # ── Assessment API (serves UI data to the Supervisor) ─────────────────────
+
+    @app.get("/api/assessment/latest")
+    def assessment_latest():
+        import sys as _sys, os as _os
+        # Ensure the agent root is importable when running inside the container
+        agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if agent_root not in _sys.path:
+            _sys.path.insert(0, agent_root)
+        from state import load_assessment_detail
+        env = environment or pipeline.environment if hasattr(pipeline, "environment") else ""
+        data = load_assessment_detail(env) if env else None
+        if data is None:
+            return Response(
+                json.dumps({"error": "No assessment available yet", "environment": env}),
+                status=404, mimetype="application/json",
+            )
+        return Response(json.dumps(data), status=200, mimetype="application/json")
+
+    @app.get("/api/assessment/history")
+    def assessment_history():
+        import sys as _sys, os as _os
+        agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if agent_root not in _sys.path:
+            _sys.path.insert(0, agent_root)
+        from state import load_state
+        env = environment or pipeline.environment if hasattr(pipeline, "environment") else ""
+        if not env:
+            return Response(json.dumps({"runs": []}), status=200, mimetype="application/json")
+        state = load_state(env)
+        runs = [
+            {
+                "timestamp": r.timestamp,
+                "instrumentation_score": r.instrumentation_score,
+                "services_active": r.services_active,
+                "services_silent": r.services_silent,
+                "detector_count": r.detector_count,
+                "critical_issues": r.critical_issues[:3],
+                "top_findings": r.top_findings[:3],
+            }
+            for r in reversed(state.runs[-20:])
+        ]
+        return Response(json.dumps({"runs": runs, "environment": env}), status=200, mimetype="application/json")
+
     return app
 
 
@@ -149,12 +193,13 @@ def start_receiver(
     pipeline: "StreamingPipeline",
     port: int = 4318,
     host: str = "0.0.0.0",
+    environment: str = "",
 ) -> threading.Thread:
     """
     Start the OTLP receiver in a daemon thread.
     Returns the thread so the caller can join it if needed.
     """
-    app = create_app(pipeline)
+    app = create_app(pipeline, environment=environment)
 
     def _serve():
         logger.info("OTLP/HTTP receiver listening on %s:%d", host, port)
