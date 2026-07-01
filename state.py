@@ -149,6 +149,28 @@ def save_state(state: EnvironmentState):
     logger.debug("State saved: %s", path)
 
 
+# ── Assessment detail (full per-specialist findings + synthesis) ──────────────
+
+def save_assessment_detail(environment: str, detail: dict) -> None:
+    """Overwrite the latest full assessment detail for an environment."""
+    STATE_DIR.mkdir(exist_ok=True)
+    path = STATE_DIR / f"{environment}_detail.json"
+    path.write_text(json.dumps(detail, indent=2))
+    logger.debug("Assessment detail saved: %s", path)
+
+
+def load_assessment_detail(environment: str) -> dict | None:
+    """Return the latest full assessment detail, or None if none exists."""
+    path = STATE_DIR / f"{environment}_detail.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("Could not load assessment detail for %s: %s", environment, exc)
+        return None
+
+
 def build_run_record(
     environment: str,
     findings: dict,  # dict[str, SpecialistFindings]

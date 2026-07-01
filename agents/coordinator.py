@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from config import AgentConfig
 from agent_loop import run_agent
 from providers import get_provider
-from state import load_state, save_state, build_run_record
+from state import load_state, save_state, build_run_record, save_assessment_detail
 from tools.findings import SpecialistFindings
 import agents.health as health_agent
 import agents.instrumentation as instrumentation_agent
@@ -142,6 +142,42 @@ def run_assessment(
     record = build_run_record(config.environment, findings)
     state.add_run(record)
     save_state(state)
+
+    # Persist full assessment detail for the UI/API
+    import uuid as _uuid
+    elapsed = round(_time.time() - _run_start, 1)
+    save_assessment_detail(config.environment, {
+        "run_id": f"run_{_uuid.uuid4().hex[:10]}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "environment": config.environment,
+        "elapsed_seconds": elapsed,
+        "status": "complete",
+        "specialists": {
+            name: {
+                "domain": f.domain,
+                "summary": f.summary,
+                "instrumentation_score": f.instrumentation_score,
+                "services_active": f.services_active,
+                "services_silent": f.services_silent,
+                "issues": [
+                    {
+                        "severity": i.severity,
+                        "domain": i.domain,
+                        "service": i.service,
+                        "description": i.description,
+                        "recommendation": i.recommendation,
+                    }
+                    for i in f.issues
+                ],
+                "metrics": f.metrics,
+                "actions_taken": f.actions_taken,
+                "raw_text": f.raw_text,
+            }
+            for name, f in findings.items()
+        },
+        "cross_domain": cross_domain,
+        "synthesis": synthesis,
+    })
 
     # Emit self-observability metrics now that we have the real findings dict
     if monitor is not None:

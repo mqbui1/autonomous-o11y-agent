@@ -206,7 +206,8 @@ def _run_streaming(agent, config, args, monitor=None):
 
     pipeline.service_tracker.on_new_service(on_new_service)
 
-    start_receiver(pipeline, port=config.streaming_port, host=config.streaming_host)
+    start_receiver(pipeline, port=config.streaming_port, host=config.streaming_host,
+                   environment=config.environment)
     logger.info(
         "OTLP receiver ready. Configure gateway otlp/http exporter to "
         "http://<agent-service>:%d",
