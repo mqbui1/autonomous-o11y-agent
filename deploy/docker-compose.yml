@@ -201,6 +201,7 @@ services:
       - "7001"
     environment:
       - CURRENCY_PORT=7001
+      - VERSION=${DEMO_VERSION:-latest}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT},service.name=currency
     depends_on:
@@ -318,7 +319,7 @@ services:
       - ENVOY_PORT=8080
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
-      - FLAGD_UI_HOST=flagd-ui
+      - FLAGD_UI_HOST=flagd
       - FLAGD_UI_PORT=4000
     depends_on:
       frontend:
@@ -540,8 +541,6 @@ services:
     restart: unless-stopped
     ports:
       - "16686"
-    environment:
-      - METRICS_STORAGE_TYPE=memory
     logging: *logging
 
   grafana:
