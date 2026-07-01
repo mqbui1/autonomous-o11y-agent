@@ -318,10 +318,20 @@ services:
       - OTEL_SERVICE_NAME=frontend-proxy
       - ENVOY_PORT=8080
       - ENVOY_ADDR=0.0.0.0
+      - ENVOY_ADMIN_PORT=10000
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
       - FLAGD_UI_HOST=flagd
       - FLAGD_UI_PORT=4000
+      - JAEGER_UI_PORT=16686
+      - OTEL_SERVICE_NAMESPACE=opentelemetry-demo
+      # Stub ports for optional services not deployed
+      - CHATBOT_HOST=localhost
+      - CHATBOT_PORT=8080
+      - FIREPIT_HOST=localhost
+      - FIREPIT_PORT=8080
+      - TELEMETRY_DOCS_HOST=localhost
+      - TELEMETRY_DOCS_PORT=8080
     depends_on:
       frontend:
         condition: service_started
