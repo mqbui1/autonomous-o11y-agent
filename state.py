@@ -214,8 +214,13 @@ def build_run_record(
     # Cardinality issues
     cardinality_issues = 0
     if governance:
-        cardinality_issues = governance.metrics.get("anomaly_count", 0) + (
-            1 if governance.metrics.get("top_cardinality_mts", 0) > 10000 else 0
+        def _to_int(val, default=0):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return default
+        cardinality_issues = _to_int(governance.metrics.get("anomaly_count")) + (
+            1 if _to_int(governance.metrics.get("top_cardinality_mts")) > 10000 else 0
         )
 
     # Critical issues (descriptions only)
