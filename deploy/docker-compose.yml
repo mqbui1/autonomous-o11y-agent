@@ -70,7 +70,8 @@ services:
       # AWS credentials for Bedrock LLM (default provider)
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
       # Optional: switch to OpenAI-compatible provider
       - LLM_PROVIDER=${LLM_PROVIDER:-bedrock}
       - OPENAI_BASE_URL
@@ -84,7 +85,7 @@ services:
       - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
       - ALERT_SUPPRESS=${ALERT_SUPPRESS:-}
     volumes:
-      - agent-state:/home/agent/.o11y-agent
+      - agent-state:/root/.o11y-agent
     depends_on:
       otel-collector:
         condition: service_started
@@ -560,6 +561,27 @@ services:
     restart: unless-stopped
     ports:
       - "3000"
+    logging: *logging
+
+  # ============================================================
+  # SUPERVISOR UI
+  # Bridges the O11y Agent assessment API into a web dashboard.
+  # Open http://localhost:9090 — click "Agent" tab for findings.
+  # ============================================================
+  supervisor:
+    build:
+      context: ../../splunk-otel-supervisor
+      dockerfile: Dockerfile
+    container_name: supervisor
+    restart: unless-stopped
+    ports:
+      - "9090:8080"
+    environment:
+      - O11Y_AGENT_URL=http://o11y-agent:4318
+      - SPLUNK_REALM
+      - SPLUNK_ACCESS_TOKEN
+    depends_on:
+      - o11y-agent
     logging: *logging
 
 volumes:
