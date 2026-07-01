@@ -16,11 +16,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
         werkzeug>=3.0.0
 
 # Copy agent source (build context is repo root)
-COPY agents/       ./agents/
-COPY tools/        ./tools/
-COPY providers/    ./providers/
-COPY streaming/    ./streaming/
-COPY approval/     ./approval/
+COPY agents/        ./agents/
+COPY tools/         ./tools/
+COPY providers/     ./providers/
+COPY streaming/     ./streaming/
+COPY approval/      ./approval/
+COPY observability/ ./observability/
 COPY agent.py      ./
 COPY agent_loop.py ./
 COPY config.py     ./
