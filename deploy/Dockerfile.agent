@@ -22,6 +22,7 @@ COPY providers/     ./providers/
 COPY streaming/     ./streaming/
 COPY approval/      ./approval/
 COPY observability/ ./observability/
+COPY receiver/      ./receiver/
 COPY agent.py      ./
 COPY agent_loop.py ./
 COPY config.py     ./
