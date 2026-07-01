@@ -4,6 +4,8 @@
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
+    check_collector_pipeline:
+      enabled: false   # don't fail health check due to exporter retries
   http_forwarder:
     ingress:
       endpoint: 0.0.0.0:6060
@@ -64,16 +66,11 @@ exporters:
     sync_host_metadata: false
     send_otlp_histograms: true   # required for latency histogram charts
 
-  # Logs → Splunk Platform (HEC)
-  splunk_hec/logs:
-    token: "${SPLUNK_INGEST_TOKEN}"
-    endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
-    source: "otel"
-    sourcetype: "otel"
-    index: "astronomyshop"
-    profiling_data_enabled: false
-    tls:
-      insecure_skip_verify: false
+  # Logs → Splunk O11y Log Observer (OTLP format)
+  otlphttp/logs:
+    logs_endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
+    headers:
+      "X-SF-Token": "${SPLUNK_INGEST_TOKEN}"
 
   # Secondary fan-out → O11y Agent streaming receiver
   # Queued so agent latency never blocks the primary Splunk export path.
@@ -106,4 +103,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
-      exporters: [splunk_hec/logs, otlphttp/agent]
+      exporters: [otlphttp/logs, otlphttp/agent]
