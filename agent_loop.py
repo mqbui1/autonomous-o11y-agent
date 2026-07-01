@@ -8,11 +8,18 @@ When the model returns multiple tool_use blocks in a single turn, all are
 executed concurrently via ThreadPoolExecutor.
 """
 
+import json
 import logging
+import os
+import pathlib
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+_CAPTURE_DIR = pathlib.Path(os.getenv("TRAINING_DATA_DIR", "/root/.o11y-agent/training"))
 
 
 def run_agent(
@@ -36,6 +43,9 @@ def run_agent(
         from providers.bedrock import BedrockProvider
         from botocore.config import Config
         provider = BedrockProvider(model_id=model_id, region=region)
+
+    capture = os.getenv("CAPTURE_TRAINING_DATA", "").lower() in ("1", "true", "yes")
+    _start = time.time()
 
     messages = [{"role": "user", "content": [{"text": initial_message}]}]
     native_tools = provider.convert_tools(tools)
@@ -61,7 +71,10 @@ def run_agent(
         logger.debug("Turn %d: stop_reason=%s", turn + 1, stop_reason)
 
         if stop_reason == "end_turn":
-            return result["text"]
+            final_text = result["text"]
+            if capture:
+                _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+            return final_text
 
         if stop_reason == "tool_use":
             tool_uses = result["tool_uses"]
@@ -114,6 +127,26 @@ def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
         return f"Tool {name} error: {exc}"
+
+
+def _save_conversation(system: str, user: str, messages: list, final_text: str, tools: list, start: float) -> None:
+    """Persist a completed conversation as a JSONL training example."""
+    try:
+        _CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        record = {
+            "id": uuid.uuid4().hex[:12],
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "elapsed_seconds": round(time.time() - start, 1),
+            "system": system,
+            "user": user,
+            "messages": messages,
+            "final_text": final_text,
+            "tool_names": [t.get("name", t.get("toolSpec", {}).get("name", "")) for t in tools],
+        }
+        path = _CAPTURE_DIR / f"{record['id']}.jsonl"
+        path.write_text(json.dumps(record))
+    except Exception as exc:
+        logger.debug("Training data capture failed: %s", exc)
 
 
 def _openai_msg_to_bedrock(result: dict) -> dict:

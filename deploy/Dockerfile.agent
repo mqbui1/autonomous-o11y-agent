@@ -30,6 +30,7 @@ COPY main.py       ./
 COPY state.py      ./
 COPY loop.py       ./
 COPY narrator.py   ./
+COPY training/generate_from_assessments.py ./training/generate_from_assessments.py
 
 # State directory
 RUN mkdir -p /home/agent/.o11y-agent
