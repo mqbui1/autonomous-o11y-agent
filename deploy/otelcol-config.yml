@@ -4,8 +4,6 @@
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
-    check_collector_pipeline:
-      enabled: false   # don't fail health check due to exporter retries
   http_forwarder:
     ingress:
       endpoint: 0.0.0.0:6060

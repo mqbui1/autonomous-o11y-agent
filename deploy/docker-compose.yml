@@ -50,11 +50,6 @@ services:
       - SPLUNK_REALM
       - SPLUNK_ENVIRONMENT
       - GOMEMLIMIT=200MiB
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:13133/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     logging: *logging
 
   # ============================================================
@@ -100,7 +95,7 @@ services:
       - agent-state:/home/agent/.o11y-agent
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   # ============================================================
@@ -124,9 +119,9 @@ services:
       - OTEL_SERVICE_NAME=accounting
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       kafka:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   ad:
@@ -150,7 +145,7 @@ services:
       - OTEL_SERVICE_NAME=ad
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       flagd:
         condition: service_started
     logging: *logging
@@ -176,7 +171,7 @@ services:
       - ASPNETCORE_URLS=http://*:7070
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       valkey-cart:
         condition: service_started
     logging: *logging
@@ -207,7 +202,7 @@ services:
       - OTEL_SERVICE_NAME=checkout
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       cart:
         condition: service_started
       currency:
@@ -238,7 +233,7 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT},service.name=currency
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   email:
@@ -259,7 +254,7 @@ services:
       - OTEL_SERVICE_NAME=email
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   fraud-detection:
@@ -281,9 +276,9 @@ services:
       - OTEL_LOGS_EXPORTER=otlp
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       kafka:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   frontend:
@@ -318,7 +313,7 @@ services:
       - ENV_PLATFORM=local
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       ad:
         condition: service_started
       cart:
@@ -399,7 +394,7 @@ services:
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   load-generator:
@@ -454,7 +449,7 @@ services:
       - OTEL_SERVICE_NAME=payment
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       flagd:
         condition: service_started
     logging: *logging
@@ -480,7 +475,7 @@ services:
       - OTEL_SERVICE_NAME=product-catalog
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   quote:
@@ -502,7 +497,7 @@ services:
       - OTEL_PHP_INTERNAL_METRICS_ENABLED=true
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   recommendation:
@@ -528,7 +523,7 @@ services:
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
       product-catalog:
         condition: service_started
     logging: *logging
@@ -551,7 +546,7 @@ services:
       - OTEL_SERVICE_NAME=shipping
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     logging: *logging
 
   # ============================================================
