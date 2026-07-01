@@ -80,6 +80,7 @@ services:
       # Agent behaviour
       - WATCH_INTERVAL=${WATCH_INTERVAL:-30}
       - AUTO_APPLY=${AUTO_APPLY:-false}
+      - CAPTURE_TRAINING_DATA=${CAPTURE_TRAINING_DATA:-false}
       # Streaming receiver (collector fans out here)
       - OTLP_RECEIVER_PORT=4318
       - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
