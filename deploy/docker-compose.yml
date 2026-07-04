@@ -72,8 +72,14 @@ services:
       - AWS_SECRET_ACCESS_KEY
       - AWS_SESSION_TOKEN
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
-      # Optional: switch to OpenAI-compatible provider
+      # LLM provider — set LLM_PROVIDER in .env to "bedrock", "ollama", or "openai"
       - LLM_PROVIDER=${LLM_PROVIDER:-bedrock}
+      # Bedrock (LLM_PROVIDER=bedrock)
+      - BEDROCK_MODEL_ID
+      # Ollama (LLM_PROVIDER=ollama)
+      - OLLAMA_MODEL
+      - OLLAMA_BASE_URL
+      # OpenAI-compatible (LLM_PROVIDER=openai)
       - OPENAI_BASE_URL
       - OPENAI_API_KEY
       - OPENAI_MODEL
@@ -81,12 +87,17 @@ services:
       - WATCH_INTERVAL=${WATCH_INTERVAL:-30}
       - AUTO_APPLY=${AUTO_APPLY:-false}
       - CAPTURE_TRAINING_DATA=${CAPTURE_TRAINING_DATA:-false}
+      - TOOL_TIMEOUT=${TOOL_TIMEOUT:-180}
       # Streaming receiver (collector fans out here)
       - OTLP_RECEIVER_PORT=4318
       - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
       - ALERT_SUPPRESS=${ALERT_SUPPRESS:-}
     volumes:
       - agent-state:/root/.o11y-agent
+      - ../../auto-detector-provisioner:/opt/auto-detector-provisioner:ro
+      - ../../o11y-instrumentation-analyzer:/opt/o11y-instrumentation-analyzer:ro
+      - ../../o11y-usage-governance:/opt/o11y-usage-governance:ro
+      - ../../splunk-o11y-health-check:/opt/splunk-o11y-health-check:ro
     depends_on:
       otel-collector:
         condition: service_started
@@ -300,8 +311,7 @@ services:
     container_name: frontend-proxy
     restart: unless-stopped
     ports:
-      - "8080:8080"    # Main demo UI — open http://localhost:8080
-      - "10000:10000"  # Envoy admin
+      - "10000:10000"  # Envoy admin (8080 moved to rum-proxy for RUM injection)
     environment:
       - FRONTEND_PORT=8080
       - FRONTEND_HOST=frontend
@@ -344,6 +354,30 @@ services:
       jaeger:
         condition: service_started
     dns_search: ""
+    logging: *logging
+
+  # ============================================================
+  # RUM INJECTOR
+  # Nginx proxy that sits in front of frontend-proxy and injects
+  # the Splunk RUM JavaScript snippet into every HTML response.
+  # Requires SPLUNK_RUM_TOKEN in .env (create a RUM-type token in
+  # Splunk O11y Cloud → Settings → Access Tokens).
+  # Open http://localhost:8080 as before — nothing else changes.
+  # ============================================================
+  rum-proxy:
+    build:
+      context: ./rum-injector
+      dockerfile: Dockerfile
+    container_name: rum-proxy
+    restart: unless-stopped
+    ports:
+      - "8080:80"      # Main demo UI — open http://localhost:8080
+    environment:
+      - SPLUNK_REALM
+      - SPLUNK_ENVIRONMENT
+      - SPLUNK_RUM_TOKEN
+    depends_on:
+      - frontend-proxy
     logging: *logging
 
   image-provider:
@@ -413,7 +447,9 @@ services:
     logging: *logging
 
   product-catalog:
-    image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-product-catalog
+    # Pinned to 1.12.0: 2.0.x+ requires an external ./products directory not bundled in the image.
+    # 1.12.0 embeds product data and works standalone. Use PRODUCT_CATALOG_SERVICE_PORT (not PORT).
+    image: ghcr.io/open-telemetry/demo:1.12.0-productcatalogservice
     container_name: product-catalog
     restart: unless-stopped
     ports:
@@ -421,7 +457,7 @@ services:
     environment:
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
-      - PRODUCT_CATALOG_PORT=3550
+      - PRODUCT_CATALOG_SERVICE_PORT=3550
       - PRODUCT_CATALOG_RELOAD_INTERVAL=10
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
@@ -526,6 +562,9 @@ services:
     restart: unless-stopped
     environment:
       - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      # KRaft mode requires explicit listener + quorum config (new in 2025 image)
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
@@ -581,6 +620,13 @@ services:
       - O11Y_AGENT_URL=http://o11y-agent:4318
       - SPLUNK_REALM
       - SPLUNK_ACCESS_TOKEN
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen2.5:3b
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_DEFAULT_REGION
+      - CLAUDE_MODEL=${BEDROCK_MODEL_ID}
     depends_on:
       - o11y-agent
     logging: *logging

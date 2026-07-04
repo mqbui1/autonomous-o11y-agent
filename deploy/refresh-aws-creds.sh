@@ -23,5 +23,5 @@ sed -i '' "s|^AWS_SESSION_TOKEN=.*|AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN|" "$ENV_
 
 echo "Updated .env with fresh credentials (key: ${AWS_ACCESS_KEY_ID:0:12}...)"
 echo ""
-echo "Recreating agent container to pick up new creds..."
-docker compose up -d o11y-agent
+echo "Recreating containers to pick up new creds..."
+docker compose up -d o11y-agent supervisor

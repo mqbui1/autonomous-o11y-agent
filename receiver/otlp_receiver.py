@@ -138,6 +138,7 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
         state = load_state(env)
         runs = [
             {
+                "run_id": r.run_id,
                 "timestamp": r.timestamp,
                 "instrumentation_score": r.instrumentation_score,
                 "services_active": r.services_active,
@@ -149,6 +150,22 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             for r in reversed(state.runs[-20:])
         ]
         return Response(json.dumps({"runs": runs, "environment": env}), status=200, mimetype="application/json")
+
+    @app.get("/api/assessment/<run_id>")
+    def assessment_by_id(run_id):
+        import sys as _sys, os as _os
+        agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if agent_root not in _sys.path:
+            _sys.path.insert(0, agent_root)
+        from state import load_assessment_detail_by_id
+        env = environment or (pipeline.environment if hasattr(pipeline, "environment") else "")
+        data = load_assessment_detail_by_id(env, run_id) if env else None
+        if data is None:
+            return Response(
+                json.dumps({"error": f"No assessment found for run_id: {run_id}"}),
+                status=404, mimetype="application/json",
+            )
+        return Response(json.dumps(data), status=200, mimetype="application/json")
 
     return app
 

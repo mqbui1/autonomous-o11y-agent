@@ -5,16 +5,17 @@ Proactively surfaces slow database operations, unhealthy external dependencies,
 and instrumentation gaps in outbound call coverage:
 
 - Service dependency topology with inferred service nodes (DBs, external APIs)
-- Slow DB and outbound HTTP operations via APM async trace search
+- Slow DB and outbound HTTP operations ranked by p99 latency via SignalFlow
 - Per-service outbound error rates via SignalFlow
 - Discovery of which services have db.* span attributes (DB instrumentation quality)
 
-Uses APM GraphQL + SignalFlow REST APIs — no subprocess dependencies.
+Uses SignalFlow REST APIs — no subprocess dependencies.
+Note: getServiceMap and startAnalyticsSearch were removed from the APM GraphQL schema
+and have been replaced with equivalent SignalFlow metric queries.
 """
 
 import json
 import logging
-import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -61,12 +62,11 @@ def _graphql(query: str, variables: dict = None) -> dict:
 
 def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
     cfg = get_config()
-    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute"
-    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "application/json"}
-    payload = {"program": program, "start": start_ms, "stop": end_ms,
-               "resolution": 60000, "immediate": True}
+    qs = f"?start={start_ms}&stop={end_ms}&resolution=60000&immediate=true"
+    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute{qs}"
+    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "text/plain"}
     req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        url, data=program.encode("utf-8"), headers=headers, method="POST"
     )
     streams: dict[str, list] = {}
     metadata: dict[str, dict] = {}
@@ -99,73 +99,88 @@ def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
 
 def get_service_dependency_map(environment: str, lookback_minutes: int = 60) -> str:
     """
-    Get the full service dependency map including inferred services (databases,
-    external APIs, message queues) that are not directly instrumented.
+    Get the active service list with per-service call counts, error rates, and p99 latency.
 
-    Inferred services appear when a service makes outbound calls to an unmonitored
-    endpoint — they represent blind spots where you have no visibility into what
-    the dependency is doing. Returns edges with call counts, error counts, and p99
-    latency, annotated to indicate which edges go to inferred (unmonitored) services.
+    Note: getServiceMap (topology edges + inferred DB/external services) was removed from
+    the Splunk APM GraphQL schema. This function now uses SignalFlow to surface active
+    instrumented services with their request metrics as the nearest equivalent.
 
     Args:
         environment: Deployment environment name.
         lookback_minutes: How far back to look (default: 60).
     """
-    _MAP = """
-query GetServiceMap($environment: String!, $windowMs: Long) {
-  getServiceMap(environment: $environment, windowMs: $windowMs) {
-    nodes {
-      serviceName
-      isInferred
-    }
-    edges {
-      sourceServiceName
-      targetServiceName
-      callCount
-      errorCount
-      p99
-    }
-  }
-}
-"""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = now_ms - lookback_minutes * 60 * 1000
+
+    env_filter = f"filter('sf_environment', '{environment}')"
+
+    req_prog = (
+        f"data('service.request.count', filter={env_filter})"
+        f".sum(by=['sf_service']).publish(label='reqs')"
+    )
+    err_prog = (
+        f"data('service.request.error.count', filter={env_filter})"
+        f".sum(by=['sf_service']).publish(label='errors')"
+    )
+    p99_prog = (
+        f"data('service.request.duration.ns.p99', filter={env_filter})"
+        f".mean(by=['sf_service']).publish(label='p99')"
+    )
+
     try:
-        window_ms = lookback_minutes * 60 * 1000
-        resp = _graphql(_MAP, variables={"environment": environment, "windowMs": window_ms})
-        errors = resp.get("errors")
-        if errors:
-            return json.dumps({"graphql_errors": errors})
+        req_result = _signalflow_execute(req_prog, start_ms, now_ms)
+        err_result = _signalflow_execute(err_prog, start_ms, now_ms)
+        p99_result = _signalflow_execute(p99_prog, start_ms, now_ms)
 
-        svc_map = resp.get("data", {}).get("getServiceMap", {})
-        nodes = svc_map.get("nodes", [])
-        edges = svc_map.get("edges", [])
+        svc_reqs: dict[str, float] = {}
+        for sid, vals in req_result["streams"].items():
+            props = req_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or sid
+            svc_reqs[svc] = svc_reqs.get(svc, 0) + sum(vals)
 
-        instrumented = [n["serviceName"] for n in nodes if not n.get("isInferred") and n.get("serviceName")]
-        inferred = [n["serviceName"] for n in nodes if n.get("isInferred") and n.get("serviceName")]
+        svc_errors: dict[str, float] = {}
+        for sid, vals in err_result["streams"].items():
+            props = err_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or sid
+            svc_errors[svc] = svc_errors.get(svc, 0) + sum(vals)
 
-        # Classify inferred services as DB or external
-        db_nodes = []
-        external_nodes = []
-        for name in inferred:
-            name_lower = (name or "").lower()
-            if any(db in name_lower for db in _DB_SYSTEMS) or "db" in name_lower or "sql" in name_lower:
-                db_nodes.append(name)
-            else:
-                external_nodes.append(name)
+        svc_p99: dict[str, list] = {}
+        for sid, vals in p99_result["streams"].items():
+            props = p99_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or sid
+            svc_p99.setdefault(svc, []).extend(vals)
 
-        # Edges to inferred targets = dependencies without monitoring
-        blind_spot_edges = [e for e in edges if e.get("targetServiceName") in set(inferred)]
-        error_edges = [e for e in edges if (e.get("errorCount") or 0) > 0]
+        all_services = set(svc_reqs) | set(svc_errors)
+        service_nodes = []
+        for svc in sorted(all_services):
+            requests = round(svc_reqs.get(svc, 0))
+            errors = round(svc_errors.get(svc, 0))
+            p99_vals = svc_p99.get(svc, [])
+            p99_ms = round(max(p99_vals) / 1e6, 2) if p99_vals else None
+            error_rate = round(errors / requests * 100, 2) if requests > 0 else 0
+            service_nodes.append({
+                "service": svc,
+                "total_requests": requests,
+                "total_errors": errors,
+                "error_rate_pct": error_rate,
+                "p99_ms": p99_ms,
+            })
+
+        service_nodes.sort(key=lambda x: -x["total_requests"])
+        error_services = [s for s in service_nodes if s["error_rate_pct"] > 0]
 
         return json.dumps({
             "environment": environment,
             "lookback_minutes": lookback_minutes,
-            "instrumented_services": sorted(instrumented),
-            "inferred_db_services": sorted(db_nodes),
-            "inferred_external_services": sorted(external_nodes),
-            "blind_spot_count": len(inferred),
-            "error_edges": error_edges,
-            "blind_spot_edges": blind_spot_edges,
-            "all_edges": edges[:60],
+            "active_services": [s["service"] for s in service_nodes],
+            "service_count": len(service_nodes),
+            "service_metrics": service_nodes,
+            "error_services": error_services,
+            "note": (
+                "getServiceMap GraphQL was removed from the Splunk APM schema. "
+                "Topology edges and inferred (DB/external) service detection are no longer "
+                "available via API. Showing active instrumented services from SignalFlow metrics."
+            ),
         }, indent=2)
     except Exception as exc:
         return f"[get_service_dependency_map error]: {exc}"
@@ -179,98 +194,99 @@ def search_slow_outbound_calls(
     limit: int = 10,
 ) -> str:
     """
-    Find traces containing slow outbound calls (client spans) — database queries,
-    external API calls, and inter-service calls with high latency.
+    Find slow outbound operations (DB queries, external API calls, inter-service calls)
+    ranked by p99 latency.
 
-    Searches APM traces where the root span has high duration, then returns
-    the latency breakdown by service so you can see which outbound call is
-    the bottleneck. Run this proactively to find slow DB queries before they
-    become incidents.
+    Note: startAnalyticsSearch/AnalyticsSearchInput were removed from the APM GraphQL
+    schema. This function now uses SignalFlow p99 latency grouped by service+operation
+    as the nearest equivalent, returning the slowest operations rather than individual traces.
 
     Args:
         environment: Deployment environment name.
         service: Optional service name to scope the search.
         start_ms: Search window start (Unix ms). Defaults to last 1 hour if 0.
         end_ms: Search window end (Unix ms). Defaults to now if 0.
-        limit: Max traces to return (default: 10).
+        limit: Max operations to return (default: 10).
     """
-    _START = """
-mutation StartAnalyticsSearch($input: AnalyticsSearchInput!) {
-  startAnalyticsSearch(input: $input) {
-    jobId
-  }
-}
-"""
-    _GET = """
-query GetAnalyticsSearch($jobId: String!) {
-  getAnalyticsSearch(jobId: $jobId) {
-    status
-    traces {
-      traceId
-      duration
-      rootSpanName
-      rootServiceName
-      rootSpanKind
-      errorCount
-    }
-  }
-}
-"""
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     if end_ms == 0:
         end_ms = now_ms
     if start_ms == 0:
         start_ms = now_ms - 3600 * 1000  # last 1 hour
 
+    env_filter = f"filter('sf_environment', '{environment}')"
+    svc_filter = f" and filter('sf_service', '{service}')" if service else ""
+    combined_filter = env_filter + svc_filter
+
+    p99_prog = (
+        f"data('service.request.duration.ns.p99', filter={combined_filter})"
+        f".mean(by=['sf_service', 'sf_operation']).publish(label='p99')"
+    )
+    req_prog = (
+        f"data('service.request.count', filter={combined_filter})"
+        f".sum(by=['sf_service', 'sf_operation']).publish(label='reqs')"
+    )
+    err_prog = (
+        f"data('service.request.error.count', filter={combined_filter})"
+        f".sum(by=['sf_service', 'sf_operation']).publish(label='errors')"
+    )
+
     try:
-        filters = []
-        if service:
-            filters.append({"key": "sf_service", "value": service})
+        p99_result = _signalflow_execute(p99_prog, start_ms, end_ms)
+        req_result = _signalflow_execute(req_prog, start_ms, end_ms)
+        err_result = _signalflow_execute(err_prog, start_ms, end_ms)
 
-        start_resp = _graphql(_START, variables={
-            "input": {
-                "environment": environment,
-                "filters": filters,
-                "timeRange": {"startTimeMs": start_ms, "endTimeMs": end_ms},
-                "resultSet": {"limit": limit},
-            }
-        })
-        gql_errors = start_resp.get("errors")
-        if gql_errors:
-            return json.dumps({"graphql_errors": gql_errors})
+        op_p99: dict[str, list] = {}
+        for sid, vals in p99_result["streams"].items():
+            props = p99_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or ""
+            op = props.get("sf_operation") or props.get("span.name") or ""
+            key = f"{svc}::{op}"
+            op_p99.setdefault(key, []).extend(vals)
 
-        job_id = (
-            start_resp.get("data", {})
-            .get("startAnalyticsSearch", {})
-            .get("jobId")
-        )
-        if not job_id:
-            return json.dumps({"error": "No jobId returned", "response": start_resp})
+        op_reqs: dict[str, float] = {}
+        for sid, vals in req_result["streams"].items():
+            props = req_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or ""
+            op = props.get("sf_operation") or props.get("span.name") or ""
+            key = f"{svc}::{op}"
+            op_reqs[key] = op_reqs.get(key, 0) + sum(vals)
 
-        status = "RUNNING"
-        traces = []
-        for _ in range(20):
-            time.sleep(0.5)
-            poll = _graphql(_GET, variables={"jobId": job_id})
-            search = poll.get("data", {}).get("getAnalyticsSearch", {})
-            status = search.get("status", "")
-            traces = search.get("traces") or []
-            if status == "COMPLETE" or traces:
-                break
+        op_errors: dict[str, float] = {}
+        for sid, vals in err_result["streams"].items():
+            props = err_result["metadata"].get(sid, {})
+            svc = props.get("sf_service") or props.get("service.name") or ""
+            op = props.get("sf_operation") or props.get("span.name") or ""
+            key = f"{svc}::{op}"
+            op_errors[key] = op_errors.get(key, 0) + sum(vals)
 
-        # Sort by duration descending to surface slowest first
-        traces_sorted = sorted(traces, key=lambda t: t.get("duration") or 0, reverse=True)
+        ops = []
+        for key in set(op_p99) | set(op_reqs):
+            svc, op = key.split("::", 1)
+            p99_vals = op_p99.get(key, [])
+            p99_ms = round(max(p99_vals) / 1e6, 2) if p99_vals else 0
+            reqs = round(op_reqs.get(key, 0))
+            errors = round(op_errors.get(key, 0))
+            ops.append({
+                "service": svc,
+                "operation": op,
+                "p99_ms": p99_ms,
+                "total_requests": reqs,
+                "total_errors": errors,
+            })
+
+        ops.sort(key=lambda x: -x["p99_ms"])
 
         return json.dumps({
             "environment": environment,
             "service": service,
             "time_range_ms": [start_ms, end_ms],
-            "status": status,
-            "trace_count": len(traces_sorted),
-            "slowest_traces": traces_sorted[:limit],
+            "operation_count": len(ops),
+            "slowest_operations": ops[:limit],
             "note": (
-                "Traces are sorted by total duration. Use get_trace_analysis on the "
-                "top trace IDs to see which specific DB/outbound call is the bottleneck."
+                "startAnalyticsSearch/AnalyticsSearchInput were removed from the APM GraphQL schema. "
+                "Returning p99 latency per service+operation from SignalFlow instead of individual traces. "
+                "Operations are sorted by p99 latency descending."
             ),
         }, indent=2)
     except Exception as exc:
@@ -298,11 +314,11 @@ def get_outbound_call_error_rates(environment: str, hours: int = 1) -> str:
     # Error count and total request count per service
     error_prog = (
         f"data('service.request.error.count', filter={env_filter})"
-        f".sum(over='5m').groupby(['sf_service']).publish(label='errors')"
+        f".sum(by=['sf_service']).publish(label='errors')"
     )
     total_prog = (
         f"data('service.request.count', filter={env_filter})"
-        f".sum(over='5m').groupby(['sf_service']).publish(label='total')"
+        f".sum(by=['sf_service']).publish(label='total')"
     )
 
     try:
