@@ -26,7 +26,11 @@ Run a complete telemetry governance assessment:
 1. full_cardinality_scan — runs cardinality scan AND anomaly scan in parallel (use this \
    instead of calling scan_cardinality and scan_cardinality_anomalies separately)
 2. scan_trace_volume — snapshot per-service APM span volumes
-3. If issues found in step 1, call fix_cardinality_report for remediation YAML
+3. ONLY if step 1 found anomaly_count > 0 AND the governance DB is writable (not read-only), \
+   call fix_cardinality_report for remediation YAML. Skip fix_cardinality_report entirely \
+   if there are no anomalies or if the DB is read-only — it will not produce useful output.
+4. ONLY if step 1 identified a specific dimension as a top cardinality offender, call \
+   drilldown_dimension for that dimension. Do NOT call drilldown_dimension speculatively.
 
 After completing all checks, call submit_findings with your structured results.
 In issues, include every cardinality explosion and anomaly ranked by severity.

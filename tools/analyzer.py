@@ -10,7 +10,7 @@ from ._runner import get_config, run, summarise
 
 def analyze_instrumentation(
     service: str = "",
-    lookback_hours: int = 3,
+    lookback_hours: int = 1,
     skip_logs: bool = False,
 ) -> str:
     """
@@ -32,7 +32,7 @@ def analyze_instrumentation(
 
     Args:
         service: Scope analysis to a specific service. Leave empty for all services.
-        lookback_hours: How many hours of recent telemetry to sample (default: 3).
+        lookback_hours: How many hours of recent telemetry to sample (default: 1).
         skip_logs: If True, skip log analysis (faster, use when logs not configured).
     """
     cfg = get_config()
@@ -87,7 +87,7 @@ SCHEMAS = [
                         },
                         "lookback_hours": {
                             "type": "integer",
-                            "description": "Hours of recent telemetry to sample (default: 3)",
+                            "description": "Hours of recent telemetry to sample (default: 1)",
                         },
                         "skip_logs": {
                             "type": "boolean",

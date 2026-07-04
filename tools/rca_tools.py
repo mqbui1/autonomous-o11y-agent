@@ -65,17 +65,11 @@ def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
     Returns {streams: {tsId: [values]}, metadata: {tsId: {properties}}}.
     """
     cfg = get_config()
-    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute"
-    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "application/json"}
-    payload = {
-        "program": program,
-        "start": start_ms,
-        "stop": end_ms,
-        "resolution": 60000,
-        "immediate": True,
-    }
+    qs = f"?start={start_ms}&stop={end_ms}&resolution=60000&immediate=true"
+    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute{qs}"
+    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "text/plain"}
     req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        url, data=program.encode("utf-8"), headers=headers, method="POST"
     )
     streams: dict[str, list] = {}
     metadata: dict[str, dict] = {}
@@ -128,7 +122,8 @@ def get_active_incidents(environment: str = "") -> str:
     """
     try:
         data = _api("/v2/incident?includeResolved=false&limit=50")
-        incidents = data.get("results", [])
+        # API returns a list directly (not wrapped in {"results": [...]})
+        incidents = data if isinstance(data, list) else data.get("results", [])
         if environment:
             env_lower = environment.lower()
             incidents = [
@@ -160,85 +155,82 @@ def search_error_traces(
     limit: int = 10,
 ) -> str:
     """
-    Search for traces with errors near the incident time using APM async search.
+    Search for services with errors near the incident time using SignalFlow metrics.
 
-    Returns the top error traces with trace IDs, duration, root service, and error
-    count. Use the returned trace IDs with get_trace_analysis to pinpoint which
-    operation is causing the slowness or errors.
+    Returns error counts, error rates, and top erroring operations per service.
+    The APM async trace search API (startAnalyticsSearch) was removed from the
+    Splunk GraphQL schema; this implementation uses span error metrics instead,
+    which provide the same triage signal.
 
     Args:
-        service: Service name to search (e.g. 'frontend', 'checkout-service').
+        service: Service name to filter (e.g. 'frontend'). Empty = all services.
         environment: Deployment environment (e.g. 'production').
         start_ms: Search window start in Unix milliseconds.
         end_ms: Search window end in Unix milliseconds.
-        limit: Maximum number of traces to return (default: 10).
+        limit: Maximum number of services to return (default: 10).
     """
-    _START = """
-mutation StartAnalyticsSearch($input: AnalyticsSearchInput!) {
-  startAnalyticsSearch(input: $input) {
-    jobId
-  }
-}
-"""
-    _GET = """
-query GetAnalyticsSearch($jobId: String!) {
-  getAnalyticsSearch(jobId: $jobId) {
-    status
-    traces {
-      traceId
-      duration
-      rootSpanName
-      rootServiceName
-      rootSpanKind
-      errorCount
-    }
-  }
-}
-"""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if end_ms == 0:
+        end_ms = now_ms
+    if start_ms == 0:
+        start_ms = now_ms - 3600 * 1000
+
+    env_filter = f"filter('sf_environment', '{environment}')"
+    if service:
+        env_filter += f" and filter('sf_service', '{service}')"
+
     try:
-        filters = [{"key": "error", "value": "true"}]
-        if service:
-            filters.append({"key": "sf_service", "value": service})
-
-        start_resp = _graphql(_START, variables={
-            "input": {
-                "environment": environment,
-                "filters": filters,
-                "timeRange": {"startTimeMs": start_ms, "endTimeMs": end_ms},
-                "resultSet": {"limit": limit},
-            }
-        })
-        errors = start_resp.get("errors")
-        if errors:
-            return json.dumps({"graphql_errors": errors})
-
-        job_id = (
-            start_resp.get("data", {})
-            .get("startAnalyticsSearch", {})
-            .get("jobId")
+        err_prog = (
+            f"data('service.request.error.count', filter={env_filter})"
+            f".sum(by=['sf_service', 'sf_operation']).publish(label='errors')"
         )
-        if not job_id:
-            return json.dumps({"error": "No jobId returned", "response": start_resp})
+        tot_prog = (
+            f"data('service.request.count', filter={env_filter})"
+            f".sum(by=['sf_service', 'sf_operation']).publish(label='total')"
+        )
+        err_result = _signalflow_execute(err_prog, start_ms, end_ms)
+        tot_result = _signalflow_execute(tot_prog, start_ms, end_ms)
 
-        # Poll until complete (up to 20 tries, 0.5s apart = 10s max)
-        status = "RUNNING"
-        traces = []
-        for _ in range(20):
-            time.sleep(0.5)
-            poll_resp = _graphql(_GET, variables={"jobId": job_id})
-            search = poll_resp.get("data", {}).get("getAnalyticsSearch", {})
-            status = search.get("status", "")
-            traces = search.get("traces") or []
-            if status == "COMPLETE" or traces:
-                break
+        # Aggregate by service+operation from metadata dimensions
+        err_by_op: dict[tuple, float] = {}
+        for tsid, vals in err_result["streams"].items():
+            meta = err_result["metadata"].get(tsid, {})
+            svc = meta.get("sf_service", "unknown")
+            op = meta.get("sf_operation", "")
+            key = (svc, op)
+            err_by_op[key] = err_by_op.get(key, 0) + sum(vals)
 
+        tot_by_op: dict[tuple, float] = {}
+        for tsid, vals in tot_result["streams"].items():
+            meta = tot_result["metadata"].get(tsid, {})
+            svc = meta.get("sf_service", "unknown")
+            op = meta.get("sf_operation", "")
+            key = (svc, op)
+            tot_by_op[key] = tot_by_op.get(key, 0) + sum(vals)
+
+        all_keys = set(err_by_op) | set(tot_by_op)
+        rows = []
+        for (svc, op) in all_keys:
+            errs = err_by_op.get((svc, op), 0)
+            total = tot_by_op.get((svc, op), 0)
+            if errs == 0 and total == 0:
+                continue
+            rate = round(errs / total * 100, 1) if total > 0 else 100.0
+            rows.append({
+                "service": svc,
+                "operation": op,
+                "error_count": round(errs),
+                "total_count": round(total),
+                "error_rate_pct": rate,
+            })
+
+        rows.sort(key=lambda r: r["error_count"], reverse=True)
         return json.dumps({
-            "service": service,
+            "service_filter": service,
             "environment": environment,
             "time_range_ms": [start_ms, end_ms],
-            "status": status,
-            "trace_count": len(traces),
-            "traces": traces,
+            "erroring_operations": rows[:limit],
+            "total_erroring_ops": len(rows),
         }, indent=2)
     except Exception as exc:
         return f"[search_error_traces error]: {exc}"
@@ -276,7 +268,13 @@ query GetTraceAnalysis($traceId: ID!) {
         resp = _graphql(_ANALYSIS, variables={"traceId": trace_id})
         errors = resp.get("errors")
         if errors:
-            return json.dumps({"graphql_errors": errors, "traceId": trace_id})
+            # getTraceAnalysis was removed; return structured error with hint
+            return json.dumps({
+                "traceId": trace_id,
+                "note": "getTraceAnalysis is no longer available in the APM GraphQL schema. "
+                        "Use search_error_traces to identify erroring services/operations instead.",
+                "graphql_errors": errors,
+            }, indent=2)
         analysis = resp.get("data", {}).get("getTraceAnalysis", {})
         return json.dumps({
             "traceId": trace_id,
@@ -289,55 +287,72 @@ query GetTraceAnalysis($traceId: ID!) {
 
 def get_service_topology(environment: str, lookback_minutes: int = 60) -> str:
     """
-    Get the service dependency graph (topology) for an environment.
+    Get active services and their error/latency profile for an environment.
 
-    Returns all service-to-service call edges with call counts, error counts, and p99
-    latency. Use this to understand blast radius: which upstream services call the
-    failing service, and which downstream services it depends on.
+    Returns all services emitting spans, with call counts, error counts, error rates,
+    and p99 latency. The getServiceMap GraphQL API was removed from the Splunk schema;
+    this implementation uses SignalFlow span metrics which provide the same service-level
+    visibility (individual service health, not inter-service edges).
 
     Args:
         environment: Deployment environment name.
-        lookback_minutes: How far back to look for service interactions (default: 60).
+        lookback_minutes: How far back to look (default: 60).
     """
-    _MAP = """
-query GetServiceMap($environment: String!, $windowMs: Long) {
-  getServiceMap(environment: $environment, windowMs: $windowMs) {
-    nodes {
-      serviceName
-    }
-    edges {
-      sourceServiceName
-      targetServiceName
-      callCount
-      errorCount
-      p99
-    }
-  }
-}
-"""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = now_ms - lookback_minutes * 60 * 1000
+    env_filter = f"filter('sf_environment', '{environment}')"
+
     try:
-        window_ms = lookback_minutes * 60 * 1000
-        resp = _graphql(_MAP, variables={
-            "environment": environment,
-            "windowMs": window_ms,
-        })
-        errors = resp.get("errors")
-        if errors:
-            return json.dumps({"graphql_errors": errors})
-        svc_map = resp.get("data", {}).get("getServiceMap", {})
-        nodes = [
-            n.get("serviceName") for n in svc_map.get("nodes", [])
-            if n.get("serviceName")
-        ]
-        edges = svc_map.get("edges", [])
-        error_edges = [e for e in edges if (e.get("errorCount") or 0) > 0]
+        err_prog = (
+            f"data('service.request.error.count', filter={env_filter})"
+            f".sum(by=['sf_service']).publish()"
+        )
+        tot_prog = (
+            f"data('service.request.count', filter={env_filter})"
+            f".sum(by=['sf_service']).publish()"
+        )
+        p99_prog = (
+            f"data('service.request.duration.ns.p99', filter={env_filter})"
+            f".max(by=['sf_service']).publish()"
+        )
+        err_r = _signalflow_execute(err_prog, start_ms, now_ms)
+        tot_r = _signalflow_execute(tot_prog, start_ms, now_ms)
+        p99_r = _signalflow_execute(p99_prog, start_ms, now_ms)
+
+        def _agg(result, fn=sum):
+            out: dict[str, float] = {}
+            for tsid, vals in result["streams"].items():
+                svc = result["metadata"].get(tsid, {}).get("sf_service", "unknown")
+                out[svc] = fn(out.get(svc, 0), fn(vals)) if vals else out.get(svc, 0)
+            return out
+
+        err_by_svc = _agg(err_r)
+        tot_by_svc = _agg(tot_r)
+        p99_by_svc = _agg(p99_r, fn=max)
+
+        all_svcs = set(err_by_svc) | set(tot_by_svc)
+        services = []
+        for svc in sorted(all_svcs):
+            errs = round(err_by_svc.get(svc, 0))
+            total = round(tot_by_svc.get(svc, 0))
+            rate = round(errs / total * 100, 1) if total > 0 else 0.0
+            p99_ns = p99_by_svc.get(svc)
+            p99_ms = round(p99_ns / 1e6, 1) if p99_ns else None
+            services.append({
+                "serviceName": svc,
+                "callCount": total,
+                "errorCount": errs,
+                "errorRatePct": rate,
+                "p99LatencyMs": p99_ms,
+            })
+
+        error_services = [s for s in services if s["errorCount"] > 0]
         return json.dumps({
             "environment": environment,
             "lookback_minutes": lookback_minutes,
-            "service_count": len(nodes),
-            "services": sorted(nodes),
-            "error_edges": error_edges,
-            "all_edges": edges[:60],  # cap for context size
+            "service_count": len(services),
+            "services": services,
+            "error_services": error_services,
         }, indent=2)
     except Exception as exc:
         return f"[get_service_topology error]: {exc}"
@@ -412,7 +427,7 @@ def find_change_events(environment: str, start_ms: int, end_ms: int) -> str:
         return f"[find_change_events error]: {exc}"
 
 
-def get_service_error_rate(service: str, environment: str, hours: int = 1) -> str:
+def get_service_error_rate(service: str = "", environment: str = "", hours: int = 1) -> str:
     """
     Get error rate statistics for a service over a time window.
 

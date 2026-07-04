@@ -1,28 +1,33 @@
 """AWS Bedrock Converse API provider."""
 
+import logging
+import time
+
 import boto3
 from botocore.config import Config
+from botocore.exceptions import EndpointConnectionError
 
 from .base import LLMProvider
 
-_BEDROCK_CONFIG = Config(read_timeout=600, connect_timeout=10, retries={"max_attempts": 2})
+logger = logging.getLogger(__name__)
+
+# Fresh client per call — no long-lived TCP connection that can go stale
+_BEDROCK_CONFIG = Config(read_timeout=600, connect_timeout=30, retries={"max_attempts": 3})
+
+_RETRY_DELAYS = [2, 5, 15]  # seconds between retries on connection errors
 
 
 class BedrockProvider(LLMProvider):
     def __init__(self, model_id: str, region: str):
         self.model_id = model_id
         self.region = region
-        self._client = None
 
-    def _get_client(self):
-        if self._client is None:
-            self._client = boto3.client(
-                "bedrock-runtime", region_name=self.region, config=_BEDROCK_CONFIG
-            )
-        return self._client
+    def _new_client(self):
+        return boto3.client(
+            "bedrock-runtime", region_name=self.region, config=_BEDROCK_CONFIG
+        )
 
     def convert_tools(self, tools: list[dict]) -> list:
-        # Bedrock toolSpec format is the internal canonical format — pass through unchanged
         return tools
 
     def converse(self, system_prompt: str, messages: list[dict], tools: list[dict]) -> dict:
@@ -34,7 +39,20 @@ class BedrockProvider(LLMProvider):
         if tools:
             kwargs["toolConfig"] = {"tools": tools}
 
-        response = self._get_client().converse(**kwargs)
+        last_exc = None
+        for attempt, delay in enumerate([0] + _RETRY_DELAYS):
+            if delay:
+                logger.warning("Bedrock connection error (attempt %d), retrying in %ds…", attempt, delay)
+                time.sleep(delay)
+            try:
+                # Create a fresh client each attempt — avoids stale TCP connections
+                response = self._new_client().converse(**kwargs)
+                break
+            except EndpointConnectionError as exc:
+                last_exc = exc
+        else:
+            raise last_exc
+
         stop_reason = response["stopReason"]
         output_msg = response["output"]["message"]
 

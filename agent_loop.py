@@ -31,7 +31,7 @@ def run_agent(
     # Legacy kwargs kept for backward compatibility
     model_id: str = None,
     region: str = None,
-    max_turns: int = 30,
+    max_turns: int = 8,
 ) -> str:
     """
     Run a tool-calling loop against any supported LLM provider.
@@ -44,9 +44,15 @@ def run_agent(
         from botocore.config import Config
         provider = BedrockProvider(model_id=model_id, region=region)
 
+    # Qwen (and some other multilingual models) may respond in Chinese without this.
+    _lang = "IMPORTANT: You MUST respond ONLY in English. Do NOT write any Chinese, Japanese, Korean, or other non-English characters under any circumstances.\n\n"
+    system_prompt = _lang + system_prompt
+
     capture = os.getenv("CAPTURE_TRAINING_DATA", "").lower() in ("1", "true", "yes")
     _start = time.time()
 
+    # Append language reminder to the user message too (recency bias in attention)
+    initial_message = initial_message + "\n\n[REMINDER: Respond in English only.]"
     messages = [{"role": "user", "content": [{"text": initial_message}]}]
     native_tools = provider.convert_tools(tools)
 

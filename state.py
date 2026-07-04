@@ -34,6 +34,7 @@ class RunRecord:
     critical_issues: list[str] = field(default_factory=list)   # issue descriptions
     actions_taken: list[str] = field(default_factory=list)     # audit trail
     top_findings: list[str] = field(default_factory=list)
+    run_id: str = ""
 
 
 @dataclass
@@ -152,11 +153,18 @@ def save_state(state: EnvironmentState):
 # ── Assessment detail (full per-specialist findings + synthesis) ──────────────
 
 def save_assessment_detail(environment: str, detail: dict) -> None:
-    """Overwrite the latest full assessment detail for an environment."""
+    """Save full assessment detail — both as latest and as a per-run archive file."""
     STATE_DIR.mkdir(exist_ok=True)
+    # Always overwrite the "latest" pointer
     path = STATE_DIR / f"{environment}_detail.json"
     path.write_text(json.dumps(detail, indent=2))
     logger.debug("Assessment detail saved: %s", path)
+    # Also archive by run_id so history can be browsed
+    run_id = detail.get("run_id")
+    if run_id:
+        archive = STATE_DIR / f"{environment}_detail_{run_id}.json"
+        archive.write_text(json.dumps(detail, indent=2))
+        logger.debug("Assessment detail archived: %s", archive)
 
 
 def load_assessment_detail(environment: str) -> dict | None:
@@ -169,6 +177,39 @@ def load_assessment_detail(environment: str) -> dict | None:
     except Exception as exc:
         logger.warning("Could not load assessment detail for %s: %s", environment, exc)
         return None
+
+
+def load_assessment_detail_by_id(environment: str, run_id: str) -> dict | None:
+    """Return a specific run's full assessment detail by run_id, or None.
+
+    Falls back to the latest detail file if it matches the requested run_id,
+    so the current run is always accessible even before archiving starts.
+    """
+    path = STATE_DIR / f"{environment}_detail_{run_id}.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception as exc:
+            logger.warning("Could not load assessment detail %s/%s: %s", environment, run_id, exc)
+            return None
+    # Fallback: check if the latest run matches
+    latest = load_assessment_detail(environment)
+    if latest and latest.get("run_id") == run_id:
+        return latest
+    return None
+
+
+def list_run_details(environment: str) -> list[dict]:
+    """Return [{run_id, timestamp}] for all archived runs, newest first."""
+    pattern = f"{environment}_detail_run_*.json"
+    results = []
+    for p in sorted(STATE_DIR.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            d = json.loads(p.read_text())
+            results.append({"run_id": d.get("run_id", ""), "timestamp": d.get("timestamp", "")})
+        except Exception:
+            pass
+    return results
 
 
 def build_run_record(

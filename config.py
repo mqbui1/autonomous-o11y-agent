@@ -38,24 +38,26 @@ class AgentConfig:
     aws_region: str = field(
         default_factory=lambda: os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
     )
-    bedrock_model_id: str = field(
-        default_factory=lambda: os.environ.get(
-            "BEDROCK_MODEL_ID",
-            "arn:aws:bedrock:us-west-2:387769110234:application-inference-profile/fky19kpnw2m7",
-        )
-    )
-    subprocess_timeout: int = field(
-        default_factory=lambda: int(os.environ.get("TOOL_TIMEOUT", "300"))
-    )
-    specialist_timeout: int = field(
-        default_factory=lambda: int(os.environ.get("SPECIALIST_TIMEOUT", "900"))
-    )
-
-    # ── LLM provider (Gap 6 — provider abstraction) ───────────────────────────
-    # "bedrock" (default) or "openai" (any OpenAI-compatible endpoint: Luna, Azure, Vertex, Ollama)
+    # ── LLM provider ──────────────────────────────────────────────────────────
+    # Values: "bedrock" | "ollama" | "openai"
     llm_provider: str = field(
         default_factory=lambda: os.environ.get("LLM_PROVIDER", "bedrock")
     )
+
+    # Bedrock
+    bedrock_model_id: str = field(
+        default_factory=lambda: os.environ.get("BEDROCK_MODEL_ID", "")
+    )
+
+    # Ollama (local)
+    ollama_base_url: str = field(
+        default_factory=lambda: os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+    )
+    ollama_model: str = field(
+        default_factory=lambda: os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+    )
+
+    # OpenAI-compatible (Azure, Vertex, custom endpoints)
     openai_base_url: str = field(
         default_factory=lambda: os.environ.get("OPENAI_BASE_URL", "")
     )
@@ -64,6 +66,13 @@ class AgentConfig:
     )
     openai_model: str = field(
         default_factory=lambda: os.environ.get("OPENAI_MODEL", "")
+    )
+
+    subprocess_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("TOOL_TIMEOUT", "60"))
+    )
+    specialist_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("SPECIALIST_TIMEOUT", "900"))
     )
 
     # ── Streaming mode (gateway co-deployment) ────────────────────────────────
@@ -90,4 +99,12 @@ class AgentConfig:
     # ── Synthesis / assessment timeouts ───────────────────────────────────────
     synthesis_timeout: int = field(
         default_factory=lambda: int(os.environ.get("SYNTHESIS_TIMEOUT", "900"))
+    )
+    # Max LLM turns per specialist (default 8 — enough for any domain, prevents runaway loops)
+    specialist_max_turns: int = field(
+        default_factory=lambda: int(os.environ.get("SPECIALIST_MAX_TURNS", "8"))
+    )
+    # Max LLM turns for synthesis (default 5 — synthesis should drill, not loop)
+    synthesis_max_turns: int = field(
+        default_factory=lambda: int(os.environ.get("SYNTHESIS_MAX_TURNS", "5"))
     )

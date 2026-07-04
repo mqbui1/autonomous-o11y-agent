@@ -101,28 +101,34 @@ class OpenAICompatProvider(LLMProvider):
             "messages": openai_messages,
         }
         if tools:
-            kwargs["tools"] = self.convert_tools(tools)
+            # tools is already in OpenAI format (converted by agent_loop via convert_tools)
+            kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
         response = self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
         finish_reason = choice.finish_reason
 
-        if finish_reason == "tool_calls":
-            tool_uses = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "input": json.loads(tc.function.arguments or "{}"),
+        # Ollama often returns finish_reason="stop" even when tool_calls are present.
+        # Check for tool_calls on the message directly regardless of finish_reason.
+        raw_tool_calls = choice.message.tool_calls or []
+        if finish_reason == "tool_calls" or raw_tool_calls:
+            tool_uses = []
+            for tc in raw_tool_calls:
+                name = tc.function.name or ""
+                try:
+                    input_data = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    input_data = {}
+                if name:  # skip malformed tool calls with empty names
+                    tool_uses.append({"id": tc.id, "name": name, "input": input_data})
+            if tool_uses:
+                return {
+                    "stop_reason": "tool_use",
+                    "text": "",
+                    "tool_uses": tool_uses,
+                    "raw_message": choice.message,
                 }
-                for tc in (choice.message.tool_calls or [])
-            ]
-            return {
-                "stop_reason": "tool_use",
-                "text": "",
-                "tool_uses": tool_uses,
-                "raw_message": choice.message,
-            }
 
         text = choice.message.content or ""
         return {"stop_reason": "end_turn", "text": text, "tool_uses": [], "raw_message": choice.message}

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from config import AgentConfig
 from agent_loop import run_agent
 from providers import get_provider
-from state import load_state, save_state, build_run_record, save_assessment_detail
+from state import load_state, save_state, build_run_record, save_assessment_detail, list_run_details
 from tools.findings import SpecialistFindings
 import agents.health as health_agent
 import agents.instrumentation as instrumentation_agent
@@ -41,15 +41,18 @@ import agents.db as db_agent
 logger = logging.getLogger(__name__)
 
 _SYNTHESIS_SYSTEM = """\
-You are a principal observability engineer synthesizing findings from four specialist \
+You are a principal observability engineer synthesizing findings from nine specialist \
 agents for Splunk Observability Cloud.
 
 Your scope is EXCLUSIVELY the environment named below. Discard anything from other \
 environments or unrelated services.
 
-You have access to all investigation tools and MAY use them to drill into specific \
-cross-domain issues that the specialists surfaced but did not fully resolve. Only \
-call tools when a targeted follow-up would materially improve the assessment.
+You have access to lightweight API query tools (SignalFlow metrics, APM service queries, \
+incident queries). Use them ONLY for a specific cross-domain data point that no specialist \
+collected and that would materially change the priority of findings. Do NOT re-run the \
+same slow data-gathering tools the specialists already ran (analyze_instrumentation, \
+full_cardinality_scan, check_apm_health, check_otel_collector_health — those take minutes \
+and you already have their results above).
 
 Produce a complete prioritized assessment:
 1. Executive summary table (Domain | Status | Key Finding)
@@ -136,18 +139,27 @@ def run_assessment(
     if cross_domain:
         logger.info("Cross-domain issues detected — injecting into synthesis")
 
-    synthesis = _synthesize(config, findings, cross_domain, prompt)
+    if _is_convergent_blackout(findings):
+        logger.info(
+            "Convergent blackout detected (all specialists report zero telemetry) — "
+            "skipping LLM synthesis, building report from structured findings"
+        )
+        synthesis = _fast_blackout_synthesis(config, findings, cross_domain)
+    else:
+        synthesis = _synthesize(config, findings, cross_domain, prompt)
 
     # Persist rich structured state
+    import uuid as _uuid
+    run_id = f"run_{_uuid.uuid4().hex[:10]}"
     record = build_run_record(config.environment, findings)
+    record.run_id = run_id
     state.add_run(record)
     save_state(state)
 
     # Persist full assessment detail for the UI/API
-    import uuid as _uuid
     elapsed = round(_time.time() - _run_start, 1)
     save_assessment_detail(config.environment, {
-        "run_id": f"run_{_uuid.uuid4().hex[:10]}",
+        "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "environment": config.environment,
         "elapsed_seconds": elapsed,
@@ -251,6 +263,11 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
     return "\n".join(lines)
 
 
+def _strip_non_ascii(text: str) -> str:
+    """Remove non-ASCII characters that can trigger multilingual model responses."""
+    return text.encode("ascii", errors="ignore").decode("ascii")
+
+
 def _format_findings_for_synthesis(
     config: AgentConfig,
     findings: dict[str, SpecialistFindings],
@@ -281,7 +298,8 @@ def _format_findings_for_synthesis(
             parts.append(f"**Instrumentation score:** {f.instrumentation_score}/100")
         if f.issues:
             parts.append("**Issues:**")
-            for issue in sorted(f.issues, key=lambda i: ["critical","high","medium","low"].index(i.severity)):
+            _sev_order = ["critical","high","medium","low"]
+            for issue in sorted(f.issues, key=lambda i: _sev_order.index(i.severity) if i.severity in _sev_order else 99):
                 svc = f" [{issue.service}]" if issue.service else ""
                 parts.append(
                     f"  - [{issue.severity.upper()}]{svc} {issue.description} "
@@ -290,7 +308,7 @@ def _format_findings_for_synthesis(
         if f.metrics:
             parts.append(f"**Metrics:** {f.metrics}")
         if f.raw_text:
-            parts.append(f"\n**Full findings:**\n{f.raw_text}")
+            parts.append(f"\n**Full findings:**\n{_strip_non_ascii(f.raw_text)}")
         parts.append("")
 
     if custom_prompt:
@@ -305,6 +323,79 @@ def _format_findings_for_synthesis(
     return "\n".join(parts)
 
 
+def _is_convergent_blackout(findings: dict[str, SpecialistFindings]) -> bool:
+    """
+    True when the assessment is a total blackout — essentially all specialists
+    report zero active services and no usable telemetry.
+
+    Criteria (both must hold):
+      1. At least 7 of 9 specialists have services_active == 0 (or None)
+      2. Every specialist with an instrumentation_score reports <= 20
+    """
+    zero_active = sum(1 for f in findings.values() if not f.services_active)
+    scored = [f.instrumentation_score for f in findings.values() if f.instrumentation_score is not None]
+    low_scores = all(s <= 20 for s in scored) if scored else True
+    return zero_active >= 7 and low_scores
+
+
+def _fast_blackout_synthesis(
+    config: AgentConfig,
+    findings: dict[str, SpecialistFindings],
+    cross_domain: str,
+) -> str:
+    """
+    Build a synthesis report directly from structured findings when there is
+    a convergent blackout — skips the LLM pass to save 5-10 minutes.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        f"# Observability Assessment — `{config.environment}`",
+        f"**Timestamp:** {ts}  |  **Mode:** {'auto-apply' if config.auto_apply else 'dry-run'}",
+        "",
+        "## Executive Summary",
+        "",
+        "| Domain | Status | Key Finding |",
+        "|--------|--------|-------------|",
+    ]
+    _sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    for name in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db"):
+        f = findings.get(name)
+        if not f:
+            continue
+        worst = min((i.severity for i in f.issues), key=lambda s: _sev_order.get(s, 9), default=None)
+        status = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(worst, "NO DATA")
+        lines.append(f"| {name.upper()} | {status} | {(f.summary or '')[:120]} |")
+
+    if cross_domain:
+        lines.extend(["", cross_domain])
+
+    # Collect all issues sorted by severity
+    all_issues = sorted(
+        [(f.domain, i) for f in findings.values() for i in f.issues],
+        key=lambda x: _sev_order.get(x[1].severity, 9),
+    )
+
+    if all_issues:
+        lines.extend(["", "## Prioritized Action Plan", ""])
+        seen: set[str] = set()
+        for domain, issue in all_issues:
+            key = issue.recommendation[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            svc = f" [{issue.service}]" if issue.service else ""
+            lines.append(f"- **[{issue.severity.upper()}][{domain}{svc}]** {issue.description}")
+            lines.append(f"  → {issue.recommendation}")
+
+    lines.extend([
+        "",
+        "---",
+        "*Synthesis LLM skipped — convergent blackout detected (all specialists "
+        "report zero active telemetry). Report built directly from structured findings.*",
+    ])
+    return "\n".join(lines)
+
+
 def _synthesize(
     config: AgentConfig,
     findings: dict[str, SpecialistFindings],
@@ -315,18 +406,18 @@ def _synthesize(
     Final synthesis pass — LLM with full tool access so it can drill into
     cross-cutting issues that specialists surfaced but didn't fully resolve (Gap 5).
     """
-    from tools.health_check import SCHEMAS as H_SCHEMAS, TOOL_FNS as H_FNS
-    from tools.analyzer import SCHEMAS as A_SCHEMAS, TOOL_FNS as A_FNS
-    from tools.governance import SCHEMAS as G_SCHEMAS, TOOL_FNS as G_FNS
-    from tools.provisioner import SCHEMAS as P_SCHEMAS, TOOL_FNS as P_FNS
+    # Synthesis only gets API-based tools (fast, no subprocess calls).
+    # Subprocess-heavy tools (health_check, analyzer, governance scripts, provisioner)
+    # are excluded — specialists already ran them and their outputs are in the prompt.
+    # This prevents synthesis from re-blocking on 300s subprocess timeouts.
     from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
     from tools.rum_analyzer import SCHEMAS as R_SCHEMAS, TOOL_FNS as R_FNS
     from tools.rca_tools import SCHEMAS as RCA_SCHEMAS, TOOL_FNS as RCA_FNS
     from tools.synthetics_tools import SCHEMAS as SYN_SCHEMAS, TOOL_FNS as SYN_FNS
     from tools.db_tools import SCHEMAS as DB_SCHEMAS, TOOL_FNS as DB_FNS
 
-    all_schemas = H_SCHEMAS + A_SCHEMAS + G_SCHEMAS + P_SCHEMAS + L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS + SYN_SCHEMAS + DB_SCHEMAS
-    all_fns = {**H_FNS, **A_FNS, **G_FNS, **P_FNS, **L_FNS, **R_FNS, **RCA_FNS, **SYN_FNS, **DB_FNS}
+    all_schemas = L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS + SYN_SCHEMAS + DB_SCHEMAS
+    all_fns = {**L_FNS, **R_FNS, **RCA_FNS, **SYN_FNS, **DB_FNS}
 
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
@@ -340,6 +431,7 @@ def _synthesize(
             tools=all_schemas,
             tool_fns=all_fns,
             initial_message=message,
+            max_turns=config.synthesis_max_turns,
         )
         try:
             return future.result(timeout=config.synthesis_timeout)

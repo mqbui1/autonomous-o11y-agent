@@ -17,7 +17,7 @@ class Issue:
     severity: str        # critical | high | medium | low
     domain: str
     description: str
-    recommendation: str
+    recommendation: str = ""
     service: str = ""
     # Optional: tool function name + args for the approval workflow to auto-apply
     action_tool: str = ""
@@ -135,13 +135,14 @@ def make_submit_fn(collector: dict, domain: str):
     """
 
     def submit_findings(
-        summary: str,
-        issues: list,
+        summary: str = "",
+        issues: list = None,
         services_active: list = None,
         services_silent: list = None,
         instrumentation_score: int = None,
         metrics: dict = None,
         actions_taken: list = None,
+        **kwargs,  # absorb extra fields the model may pass
     ) -> str:
         parsed_issues = []
         for i in (issues or []):
