@@ -55,6 +55,21 @@ def watch(
         start = datetime.now(timezone.utc)
         logger.info("[Run %d] Starting at %s", run_count, start.isoformat())
 
+        # Pre-flight credential check — skip the run rather than produce a blank assessment
+        try:
+            from providers import check_provider_health
+            healthy, reason = check_provider_health(config)
+            if not healthy:
+                logger.warning("[Run %d] SKIPPED — %s", run_count, reason)
+                print(f"\n[Run {run_count}] SKIPPED: {reason}\n")
+                if max_runs and run_count >= max_runs:
+                    break
+                logger.info("[Run %d] Next run in %d minutes.", run_count, interval_minutes)
+                time.sleep(interval_minutes * 60)
+                continue
+        except Exception as exc:
+            logger.warning("[Run %d] Pre-flight check failed (%s), proceeding anyway.", run_count, exc)
+
         output = run_once(agent, config, monitor=monitor)
         elapsed = (datetime.now(timezone.utc) - start).seconds
         logger.info("[Run %d] Completed in %ds", run_count, elapsed)
