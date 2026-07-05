@@ -61,6 +61,18 @@ def _graphql(query: str, variables: dict = None) -> dict:
 
 
 def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
+    """Execute a SignalFlow program and return {streams, metadata}.
+
+    The API returns SSE (Server-Sent Events): each event spans multiple lines
+    with `event: <type>` and `data: <json_fragment>` prefixes, separated by
+    blank lines. We must accumulate data: lines into a complete JSON body before
+    parsing, rather than trying to JSON-parse each line individually.
+
+    data events use the format:
+      {"data": [{"tsId": "<id>", "value": <float>}], "logicalTimestampMs": ...}
+    metadata events use:
+      {"tsId": "<id>", "properties": {...}}
+    """
     cfg = get_config()
     qs = f"?start={start_ms}&stop={end_ms}&resolution=60000&immediate=true"
     url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute{qs}"
@@ -72,24 +84,34 @@ def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
     metadata: dict[str, dict] = {}
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
+            current_event_type = None
+            data_lines: list[str] = []
             for raw_line in resp:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                mtype = msg.get("type")
-                if mtype == "metadata":
-                    tsid = msg.get("tsId") or msg.get("channel") or ""
-                    if tsid:
-                        metadata[tsid] = msg.get("properties", {})
-                elif mtype == "data":
-                    for _ts, point in msg.get("data", {}).items():
-                        for sid, val in point.items():
-                            if val is not None:
-                                streams.setdefault(sid, []).append(float(val))
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                if line.startswith("event: "):
+                    current_event_type = line[7:].strip()
+                    data_lines = []
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+                elif line == "" and data_lines:
+                    # Blank line = end of SSE event; parse accumulated data
+                    try:
+                        msg = json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        data_lines = []
+                        continue
+                    etype = current_event_type or msg.get("type", "")
+                    if etype == "metadata":
+                        tsid = msg.get("tsId", "")
+                        if tsid:
+                            metadata[tsid] = msg.get("properties", {})
+                    elif etype == "data":
+                        for point in msg.get("data", []):
+                            tsid = point.get("tsId", "")
+                            val = point.get("value")
+                            if tsid and val is not None:
+                                streams.setdefault(tsid, []).append(float(val))
+                    data_lines = []
     except Exception as exc:
         logger.warning("SignalFlow execute failed: %s", exc)
     return {"streams": streams, "metadata": metadata}
@@ -115,11 +137,11 @@ def get_service_dependency_map(environment: str, lookback_minutes: int = 60) -> 
     env_filter = f"filter('sf_environment', '{environment}')"
 
     req_prog = (
-        f"data('service.request.count', filter={env_filter})"
+        f"data('spans.count', filter={env_filter})"
         f".sum(by=['sf_service']).publish(label='reqs')"
     )
     err_prog = (
-        f"data('service.request.error.count', filter={env_filter})"
+        f"data('spans.count', filter={env_filter} and filter('sf_error', 'true'))"
         f".sum(by=['sf_service']).publish(label='errors')"
     )
     p99_prog = (
@@ -223,11 +245,11 @@ def search_slow_outbound_calls(
         f".mean(by=['sf_service', 'sf_operation']).publish(label='p99')"
     )
     req_prog = (
-        f"data('service.request.count', filter={combined_filter})"
+        f"data('spans.count', filter={combined_filter})"
         f".sum(by=['sf_service', 'sf_operation']).publish(label='reqs')"
     )
     err_prog = (
-        f"data('service.request.error.count', filter={combined_filter})"
+        f"data('spans.count', filter={combined_filter} and filter('sf_error', 'true'))"
         f".sum(by=['sf_service', 'sf_operation']).publish(label='errors')"
     )
 
@@ -313,11 +335,11 @@ def get_outbound_call_error_rates(environment: str, hours: int = 1) -> str:
 
     # Error count and total request count per service
     error_prog = (
-        f"data('service.request.error.count', filter={env_filter})"
+        f"data('spans.count', filter={env_filter} and filter('sf_error', 'true'))"
         f".sum(by=['sf_service']).publish(label='errors')"
     )
     total_prog = (
-        f"data('service.request.count', filter={env_filter})"
+        f"data('spans.count', filter={env_filter})"
         f".sum(by=['sf_service']).publish(label='total')"
     )
 

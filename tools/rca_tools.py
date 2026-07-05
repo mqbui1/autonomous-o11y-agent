@@ -60,8 +60,13 @@ def _graphql(query: str, variables: dict = None) -> dict:
 
 
 def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
-    """
-    Execute a SignalFlow program over a time range.
+    """Execute a SignalFlow program over a time range.
+
+    The API returns SSE (Server-Sent Events): multi-line events with
+    `event: <type>` and `data: <json_fragment>` prefixes, blank-line separated.
+    data events: {"data": [{"tsId": "<id>", "value": <float>}], ...}
+    metadata events: {"tsId": "<id>", "properties": {...}}
+
     Returns {streams: {tsId: [values]}, metadata: {tsId: {properties}}}.
     """
     cfg = get_config()
@@ -75,24 +80,33 @@ def _signalflow_execute(program: str, start_ms: int, end_ms: int) -> dict:
     metadata: dict[str, dict] = {}
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
+            current_event_type = None
+            data_lines: list[str] = []
             for raw_line in resp:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                mtype = msg.get("type")
-                if mtype == "metadata":
-                    tsid = msg.get("tsId") or msg.get("channel") or ""
-                    if tsid:
-                        metadata[tsid] = msg.get("properties", {})
-                elif mtype == "data":
-                    for _ts, point in msg.get("data", {}).items():
-                        for sid, val in point.items():
-                            if val is not None:
-                                streams.setdefault(sid, []).append(float(val))
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                if line.startswith("event: "):
+                    current_event_type = line[7:].strip()
+                    data_lines = []
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+                elif line == "" and data_lines:
+                    try:
+                        msg = json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        data_lines = []
+                        continue
+                    etype = current_event_type or msg.get("type", "")
+                    if etype == "metadata":
+                        tsid = msg.get("tsId", "")
+                        if tsid:
+                            metadata[tsid] = msg.get("properties", {})
+                    elif etype == "data":
+                        for point in msg.get("data", []):
+                            tsid = point.get("tsId", "")
+                            val = point.get("value")
+                            if tsid and val is not None:
+                                streams.setdefault(tsid, []).append(float(val))
+                    data_lines = []
     except Exception as exc:
         logger.warning("SignalFlow execute failed: %s", exc)
     return {"streams": streams, "metadata": metadata}
@@ -181,11 +195,11 @@ def search_error_traces(
 
     try:
         err_prog = (
-            f"data('service.request.error.count', filter={env_filter})"
+            f"data('spans.count', filter={env_filter} and filter('sf_error', 'true'))"
             f".sum(by=['sf_service', 'sf_operation']).publish(label='errors')"
         )
         tot_prog = (
-            f"data('service.request.count', filter={env_filter})"
+            f"data('spans.count', filter={env_filter})"
             f".sum(by=['sf_service', 'sf_operation']).publish(label='total')"
         )
         err_result = _signalflow_execute(err_prog, start_ms, end_ms)
@@ -304,11 +318,11 @@ def get_service_topology(environment: str, lookback_minutes: int = 60) -> str:
 
     try:
         err_prog = (
-            f"data('service.request.error.count', filter={env_filter})"
+            f"data('spans.count', filter={env_filter} and filter('sf_error', 'true'))"
             f".sum(by=['sf_service']).publish()"
         )
         tot_prog = (
-            f"data('service.request.count', filter={env_filter})"
+            f"data('spans.count', filter={env_filter})"
             f".sum(by=['sf_service']).publish()"
         )
         p99_prog = (
@@ -445,11 +459,11 @@ def get_service_error_rate(service: str = "", environment: str = "", hours: int 
         f"filter('sf_environment', '{environment}') and filter('sf_service', '{service}')"
     )
     error_prog = (
-        f"data('service.request.error.count', filter={svc_filter})"
+        f"data('spans.count', filter={svc_filter} and filter('sf_error', 'true'))"
         f".sum(over='1m').publish(label='errors')"
     )
     total_prog = (
-        f"data('service.request.count', filter={svc_filter})"
+        f"data('spans.count', filter={svc_filter})"
         f".sum(over='1m').publish(label='total')"
     )
     try:

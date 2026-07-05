@@ -18,6 +18,6 @@ server {
         # Inject Splunk RUM snippet before </head> on every HTML page
         sub_filter_types text/html;
         sub_filter_once on;
-        sub_filter '</head>' '<script src="https://cdn.signalfx.com/o11y-gdi-rum/latest/splunk-otel-web.js" crossorigin="anonymous"></script><script>SplunkRum.init({beaconEndpoint:"https://rum.${SPLUNK_REALM}.signalfx.com/v1/rum",rumAccessToken:"${SPLUNK_RUM_TOKEN}",app:"astroshop",environment:"${SPLUNK_ENVIRONMENT}",version:"1.0.0"});</script></head>';
+        sub_filter '</head>' '<script src="https://cdn.signalfx.com/o11y-gdi-rum/latest/splunk-otel-web.js" crossorigin="anonymous"></script><script>SplunkRum.init({beaconEndpoint:"https://rum-ingest.${SPLUNK_REALM}.signalfx.com/v1/rum",rumAccessToken:"${SPLUNK_RUM_TOKEN}",app:"astroshop",environment:"${SPLUNK_ENVIRONMENT}",version:"1.0.0"});</script></head>';
     }
 }
