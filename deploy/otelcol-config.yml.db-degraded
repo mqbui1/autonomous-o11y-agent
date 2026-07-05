@@ -1,0 +1,141 @@
+# Splunk Gateway OTel Collector Config — DB DEGRADED (demo scenario)
+# Identical to the production config except:
+#   - transform/strip_db_attrs: strips db.system, db.name, db.operation, db.statement
+#     from all spans, simulating services that have no DB instrumentation.
+#   - Effect: DB specialist sees services making outbound calls but cannot identify
+#     which database system, what database, or which operations are slow.
+#     All database dependencies appear as inferred/unmonitored blind spots.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  http_forwarder:
+    ingress:
+      endpoint: 0.0.0.0:6060
+    egress:
+      endpoint: "https://api.${SPLUNK_REALM}.signalfx.com"
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  redis:
+    endpoint: "valkey-cart:6379"
+    collection_interval: 10s
+
+  prometheus/internal:
+    config:
+      scrape_configs:
+        - job_name: otelcol
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["0.0.0.0:8888"]
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 200
+
+  resource/add_environment:
+    attributes:
+      - action: upsert
+        value: "${SPLUNK_ENVIRONMENT}"
+        key: deployment.environment
+      - action: upsert
+        value: "${SPLUNK_ENVIRONMENT}"
+        key: sf_environment
+
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 10s
+    override: true
+
+  transform/promote_env_to_span:
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["deployment.environment"], resource.attributes["deployment.environment"])
+          - set(attributes["host.name"], resource.attributes["host.name"])
+          - set(attributes["host.id"], resource.attributes["host.id"])
+
+  # DEMO DEGRADATION: strips all DB span attributes so the DB specialist
+  # cannot identify database systems, names, or operations.
+  # Remove this processor (and from the traces pipeline below) to restore DB visibility.
+  transform/strip_db_attrs:
+    trace_statements:
+      - context: span
+        statements:
+          - delete_key(attributes, "db.system")
+          - delete_key(attributes, "db.name")
+          - delete_key(attributes, "db.operation")
+          - delete_key(attributes, "db.statement")
+          - delete_key(attributes, "db.sql.table")
+          - delete_key(attributes, "db.redis.database_index")
+          - delete_key(attributes, "db.connection_string")
+
+exporters:
+  otlphttp/traces:
+    traces_endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v2/trace/otlp"
+    headers:
+      "X-SF-Token": "${SPLUNK_INGEST_TOKEN}"
+
+  signalfx:
+    access_token: "${SPLUNK_INGEST_TOKEN}"
+    realm: "${SPLUNK_REALM}"
+    sync_host_metadata: false
+    send_otlp_histograms: true
+    timeout: 30s
+    idle_conn_timeout: 60s
+    http2_read_idle_timeout: 30s
+    http2_ping_timeout: 10s
+
+  otlphttp/agent:
+    endpoint: "http://o11y-agent:4318"
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
+service:
+  telemetry:
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888
+
+  extensions: [health_check, http_forwarder, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span, transform/strip_db_attrs]
+      exporters: [otlphttp/traces, signalfx, otlphttp/agent]
+
+    metrics:
+      receivers: [otlp, redis]
+      processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
+      exporters: [signalfx]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
+      exporters: [otlphttp/agent]
+
+    metrics/internal:
+      receivers: [prometheus/internal]
+      processors: [memory_limiter, batch]
+      exporters: [signalfx]
