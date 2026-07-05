@@ -84,6 +84,26 @@ splunk-o11y-health-check/
 
 The agent degrades gracefully if any tool is missing — specialists that depend on it report the gap rather than crashing the full run.
 
+## Remediation
+
+After all specialists complete, the coordinator runs a rule-based remediation pass (`agents/remediation.py`) that maps critical and high-severity issues to actionable supervisor operations. The results are saved as `pending_remediations` in the assessment JSON.
+
+Each remediation includes:
+- `action_type` — the supervisor ActionEngine operation to run (e.g. `create_splunk_detector`, `reload_collector`, `restart_service`)
+- `action_payload` — ready-to-execute arguments
+- `auto_applicable` — `true` if the action can run without manual config edits
+
+The Supervisor UI surfaces these as a **Pending Remediations** panel with per-item Apply buttons and a bulk "Apply Selected" option. Chat also accepts natural-language remediation requests ("apply the detector fix for checkout-service").
+
+| Issue pattern | Action |
+|---|---|
+| No detector / dark service (per-service) | `create_splunk_detector` (error_rate + latency) |
+| No detector coverage (org-wide) | `build_detectors` |
+| OTel Collector unreachable | `reload_collector` |
+| DB span attributes stripped (`db.system` missing) | `patch_collector_config` (remove transform/strip_db_attrs) |
+| Silent service / no telemetry | `restart_service` |
+| Detector threshold too tight / noisy | `rebaseline_detectors` |
+
 ## Supervisor UI integration
 
-The [Splunk OTel Supervisor](https://github.com/mqbui1/splunk-otel-supervisor) renders assessment findings in a web dashboard. After each run the agent exposes `GET /api/assessment/latest` and the supervisor proxies it to its **Agent** tab. See [deploy/docs/supervisor-integration.md](deploy/docs/supervisor-integration.md).
+The [Splunk OTel Supervisor](https://github.com/mqbui1/splunk-otel-supervisor) renders assessment findings in a web dashboard. After each run the agent exposes `GET /api/assessment/latest` and the supervisor proxies it to its **Agent** tab. The **Pending Remediations** panel lets operators apply fixes with or without human approval. See [deploy/docs/supervisor-integration.md](deploy/docs/supervisor-integration.md).

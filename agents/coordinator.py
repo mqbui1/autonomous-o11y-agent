@@ -37,6 +37,7 @@ import agents.rum as rum_agent
 import agents.rca as rca_agent
 import agents.synthetics as synthetics_agent
 import agents.db as db_agent
+from agents.remediation import generate_remediations
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,9 @@ def run_assessment(
                 )
                 logger.error("Specialist '%s' failed: %s", name, exc, exc_info=True)
 
+    # Deduplicate issues across specialists before synthesis/save
+    _dedup_cross_specialist_issues(findings)
+
     # Cross-domain analysis before synthesis
     cross_domain = _cross_domain_analysis(findings)
     if cross_domain:
@@ -178,6 +182,8 @@ def run_assessment(
                         "service": i.service,
                         "description": i.description,
                         "recommendation": i.recommendation,
+                        "action_tool": getattr(i, "action_tool", ""),
+                        "action_args": getattr(i, "action_args", {}),
                     }
                     for i in f.issues
                 ],
@@ -189,6 +195,11 @@ def run_assessment(
         },
         "cross_domain": cross_domain,
         "synthesis": synthesis,
+        "pending_remediations": generate_remediations(
+            findings,
+            splunk_config={"realm": config.realm, "access_token": config.token},
+            environment=config.environment,
+        ),
     })
 
     # Emit self-observability metrics now that we have the real findings dict
@@ -200,6 +211,60 @@ def run_assessment(
             logger.debug("SelfMonitor record_run_metrics failed: %s", _exc)
 
     return synthesis
+
+
+def _issue_topic(description: str) -> str:
+    """Extract semantic topic from an issue description for deduplication."""
+    d = description.lower()
+    if "rum" in d or "real user monitoring" in d:               return "rum"
+    if "log observer" in d or "log ingestion" in d:             return "logging"
+    if "/v1/log/entries" in d or "log data" in d:               return "logging"
+    if "synthetic" in d:                                         return "synthetics"
+    if "detector" in d or "no alert" in d:                       return "alerting"
+    if "otelcol" in d or "otel collector" in d:                  return "collector"
+    if "db.system" in d or "database span" in d:                 return "db_attrs"
+    if "silent" in d and "service" in d:                         return "service_silence"
+    if "error rate" in d and ("%" in d or "errors out of" in d): return "error_rate"
+    if "trace storm" in d or "trace volume" in d:                return "trace_volume"
+    if "k8s" in d or "kubernetes" in d:                          return "k8s"
+    if "cardinality" in d:                                       return "cardinality"
+    if "runtime metric" in d:                                    return "runtime_metrics"
+    if "correlation" in d and "log" in d:                        return "log_correlation"
+    return description.strip()[:50].lower()
+
+
+def _issue_fingerprint(issue) -> str:
+    """Semantic fingerprint for deduplicating issues across specialists."""
+    svc = (issue.service or "").lower().strip()
+    topic = _issue_topic(issue.description or "")
+    return f"{svc}|{issue.severity}|{topic}"
+
+
+def _dedup_cross_specialist_issues(findings: dict[str, SpecialistFindings]) -> None:
+    """
+    Remove duplicate issues that appear in multiple specialist domains.
+    Keeps the first occurrence (by specialist priority order) and removes
+    near-identical issues from other specialists so the UI doesn't show the
+    same root problem 5-10 times.
+    """
+    # Priority order — more specific specialists keep their issues
+    PRIORITY = ["instrumentation", "db", "rum", "rca", "health", "logs",
+                "synthetics", "detector", "governance"]
+    ordered = [k for k in PRIORITY if k in findings] + \
+              [k for k in findings if k not in PRIORITY]
+
+    seen: set[str] = set()
+    for name in ordered:
+        f = findings.get(name)
+        if not f:
+            continue
+        deduped = []
+        for issue in f.issues:
+            fp = _issue_fingerprint(issue)
+            if fp not in seen:
+                seen.add(fp)
+                deduped.append(issue)
+        f.issues = deduped
 
 
 def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
