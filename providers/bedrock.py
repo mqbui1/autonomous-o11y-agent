@@ -5,7 +5,7 @@ import time
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import EndpointConnectionError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from .base import LLMProvider
 
@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 _BEDROCK_CONFIG = Config(read_timeout=600, connect_timeout=30, retries={"max_attempts": 3})
 
 _RETRY_DELAYS = [2, 5, 15]  # seconds between retries on connection errors
+
+# ClientError codes that mean credentials are expired/invalid — retrying won't help
+_AUTH_ERROR_CODES = {
+    "ExpiredTokenException",
+    "InvalidClientTokenId",
+    "TokenRefreshRequired",
+    "UnrecognizedClientException",
+    "AuthFailure",
+    "InvalidToken",
+}
+
+
+class CredentialExpiredError(RuntimeError):
+    """Raised when AWS credentials are expired or invalid."""
 
 
 class BedrockProvider(LLMProvider):
@@ -26,6 +40,20 @@ class BedrockProvider(LLMProvider):
         return boto3.client(
             "bedrock-runtime", region_name=self.region, config=_BEDROCK_CONFIG
         )
+
+    def is_token_valid(self) -> bool:
+        """Quick STS check — returns False if credentials are expired or missing."""
+        try:
+            boto3.client("sts", region_name=self.region).get_caller_identity()
+            return True
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in _AUTH_ERROR_CODES:
+                logger.warning("AWS credentials expired or invalid (code=%s)", code)
+                return False
+            return True  # other ClientErrors (e.g. network) — don't block the run
+        except Exception:
+            return True  # non-auth errors — don't block the run
 
     def convert_tools(self, tools: list[dict]) -> list:
         return tools
@@ -48,6 +76,14 @@ class BedrockProvider(LLMProvider):
                 # Create a fresh client each attempt — avoids stale TCP connections
                 response = self._new_client().converse(**kwargs)
                 break
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in _AUTH_ERROR_CODES:
+                    raise CredentialExpiredError(
+                        f"AWS credentials expired or invalid (code={code}). "
+                        "Run deploy/refresh-aws-creds.sh to update."
+                    ) from exc
+                raise  # other ClientErrors (throttling, etc.) — surface immediately
             except EndpointConnectionError as exc:
                 last_exc = exc
         else:

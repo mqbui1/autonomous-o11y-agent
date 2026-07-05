@@ -47,4 +47,16 @@ def get_provider(config) -> LLMProvider:
     )
 
 
-__all__ = ["LLMProvider", "BedrockProvider", "OpenAICompatProvider", "get_provider"]
+def check_provider_health(config) -> tuple[bool, str]:
+    """
+    Returns (True, "") if the provider is ready, or (False, reason) if not.
+    For Bedrock, performs a cheap STS credential check.
+    """
+    if config.llm_provider.lower() == "bedrock":
+        provider = get_provider(config)
+        if not provider.is_token_valid():
+            return False, "AWS credentials expired. Run deploy/refresh-aws-creds.sh to update."
+    return True, ""
+
+
+__all__ = ["LLMProvider", "BedrockProvider", "OpenAICompatProvider", "get_provider", "check_provider_health"]
