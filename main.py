@@ -169,7 +169,7 @@ def _run_streaming(agent, config, args, monitor=None):
     """
     import time
     from streaming.pipeline import StreamingPipeline
-    from receiver.otlp_receiver import start_receiver
+    from receiver.otlp_receiver import start_receiver, trigger_event, set_assessment_running
 
     logger.info(
         "Starting streaming mode — OTLP receiver on %s:%d",
@@ -228,6 +228,7 @@ def _run_streaming(agent, config, args, monitor=None):
     while True:
         run_count += 1
         logger.info("[Batch run %d] Starting assessment", run_count)
+        set_assessment_running(True)
         try:
             output = agent(config, prompt=args.prompt, observation_buffer=obs_buffer, monitor=monitor)
             # Re-seed service tracker after each batch run with updated service list
@@ -239,6 +240,8 @@ def _run_streaming(agent, config, args, monitor=None):
         except Exception as exc:
             logger.error("[Batch run %d] Failed: %s", run_count, exc)
             output = f"[Assessment failed]: {exc}"
+        finally:
+            set_assessment_running(False)
 
         print(f"\n{'='*70}")
         print(f"  BATCH ASSESSMENT  |  Run {run_count}")
@@ -246,8 +249,9 @@ def _run_streaming(agent, config, args, monitor=None):
         print(output)
         print(f"{'='*70}\n")
 
-        logger.info("[Batch run %d] Next run in %d minutes.", run_count, interval_minutes)
-        time.sleep(interval_minutes * 60)
+        logger.info("[Batch run %d] Next run in %d minutes (or on trigger).", run_count, interval_minutes)
+        trigger_event.wait(timeout=interval_minutes * 60)
+        trigger_event.clear()
 
 
 if __name__ == "__main__":
