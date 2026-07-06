@@ -27,6 +27,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Set by POST /api/assessment/trigger; waited on by the batch assessment loop.
+trigger_event = threading.Event()
+
+# Set while an assessment is actively running; cleared when it finishes.
+_running_lock = threading.Lock()
+_assessment_running = False
+
+
+def set_assessment_running(value: bool) -> None:
+    global _assessment_running
+    with _running_lock:
+        _assessment_running = value
+
+
+def is_assessment_running() -> bool:
+    with _running_lock:
+        return _assessment_running
+
 
 def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
     app = Flask(__name__)
@@ -166,6 +184,41 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
                 status=404, mimetype="application/json",
             )
         return Response(json.dumps(data), status=200, mimetype="application/json")
+
+    @app.get("/api/assessment/running")
+    def assessment_running_status():
+        running = is_assessment_running()
+        queued = trigger_event.is_set()
+        return Response(
+            json.dumps({"running": running, "queued": queued}),
+            status=200, mimetype="application/json",
+        )
+
+    @app.post("/api/assessment/trigger")
+    def assessment_trigger():
+        running = is_assessment_running()
+        queued = trigger_event.is_set()
+        if running and queued:
+            return Response(
+                json.dumps({"status": "already_pending", "message": "Assessment is running and another is already queued."}),
+                status=200, mimetype="application/json",
+            )
+        if queued:
+            return Response(
+                json.dumps({"status": "already_pending", "message": "A triggered run is already queued."}),
+                status=200, mimetype="application/json",
+            )
+        trigger_event.set()
+        logger.info("Assessment trigger received via API — waking up batch loop.")
+        if running:
+            return Response(
+                json.dumps({"status": "queued_after_current", "message": "Assessment is running — your request will execute immediately after."}),
+                status=202, mimetype="application/json",
+            )
+        return Response(
+            json.dumps({"status": "triggered", "message": "Assessment starting shortly."}),
+            status=202, mimetype="application/json",
+        )
 
     return app
 
