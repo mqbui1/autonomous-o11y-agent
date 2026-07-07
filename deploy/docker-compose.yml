@@ -198,6 +198,7 @@ services:
       - OTEL_SERVICE_NAME=checkout
       # AlwaysOn Profiling — Go, requires github.com/signalfx/splunk-otel-go/instrumentation/github.com/gorilla/mux/splunkmux
       - SPLUNK_PROFILER_ENABLED=true
+      - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
     depends_on:
       otel-collector:
         condition: service_started
@@ -302,6 +303,7 @@ services:
       # build to activate. Vars are pre-set here so profiling works immediately on upgrade.
       - SPLUNK_PROFILER_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
+      - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
     depends_on:
       otel-collector:
         condition: service_started
@@ -462,6 +464,7 @@ services:
       # AlwaysOn Profiling — Node.js, requires @splunk/otel
       - SPLUNK_PROFILER_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
+      - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
     depends_on:
       otel-collector:
         condition: service_started
@@ -531,6 +534,7 @@ services:
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       # AlwaysOn Profiling — Python, requires splunk-opentelemetry[all] package
       - SPLUNK_PROFILER_ENABLED=true
+      - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
     depends_on:
       otel-collector:
         condition: service_started
