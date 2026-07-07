@@ -83,11 +83,20 @@ def run_assessment(
     monitor: optional SelfMonitor — records run metrics after findings are collected.
     """
     state = load_state(config.environment)
-    state_context = state.trend_context()
+    trend_context = state.trend_context()
+
+    # Build two streaming summaries: one with PII (governance only) and one without.
+    # PII detections must not be injected into every specialist — each would independently
+    # raise the same PII findings, creating 10× duplicate issues. Governance owns PII.
+    state_context = trend_context
+    state_context_with_pii = trend_context
     if observation_buffer is not None:
-        streaming_context = observation_buffer.summarize(window_minutes=60)
-        if streaming_context:
-            state_context = (state_context + "\n\n" + streaming_context).strip()
+        streaming_no_pii = observation_buffer.summarize(window_minutes=60, include_pii=False)
+        streaming_with_pii = observation_buffer.summarize(window_minutes=60, include_pii=True)
+        if streaming_no_pii:
+            state_context = (trend_context + "\n\n" + streaming_no_pii).strip()
+        if streaming_with_pii:
+            state_context_with_pii = (trend_context + "\n\n" + streaming_with_pii).strip()
 
     specialists = {
         "health": health_agent,
@@ -101,6 +110,9 @@ def run_assessment(
         "db": db_agent,
         "performance": performance_agent,
     }
+
+    # Governance is the only specialist that should see PII observations.
+    _pii_owners = {"governance"}
 
     logger.info(
         "Launching %d specialist agents in parallel for environment=%s",
@@ -119,7 +131,10 @@ def run_assessment(
     findings: dict[str, SpecialistFindings] = {}
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
-            pool.submit(mod.run, config, state_context): name
+            pool.submit(
+                mod.run, config,
+                state_context_with_pii if name in _pii_owners else state_context,
+            ): name
             for name, mod in specialists.items()
         }
         for future in as_completed(futures):

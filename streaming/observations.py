@@ -46,10 +46,13 @@ class ObservationBuffer:
         with self._lock:
             return [o for o in self._observations if o.timestamp > cutoff]
 
-    def summarize(self, window_minutes: int = 60) -> str:
+    def summarize(self, window_minutes: int = 60, include_pii: bool = True) -> str:
         """
         Return a human-readable summary for injection into batch assessment context.
         Returns empty string if there are no observations in the window.
+
+        include_pii: set False for all specialists except governance so PII
+        detections are not duplicated across every specialist domain.
         """
         recent = self.since(window_minutes)
         if not recent:
@@ -64,7 +67,7 @@ class ObservationBuffer:
             f"Total events: {len(recent)}\n",
         ]
 
-        if "pii" in by_type:
+        if include_pii and "pii" in by_type:
             lines.append("**PII/PCI detections (CRITICAL — review before proceeding):**")
             for obs in by_type["pii"][:10]:
                 lines.append(f"  - [{obs.service}] {obs.detail}")
