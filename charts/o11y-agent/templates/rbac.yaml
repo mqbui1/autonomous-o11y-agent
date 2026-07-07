@@ -1,0 +1,83 @@
+{{- if .Values.serviceAccount.create }}
+---
+# ClusterRole — permissions the o11y-agent needs across namespaces.
+#
+# READ permissions (always needed):
+#   pods, services, deployments, nodes — for service discovery and health checks
+#   configmaps — to read existing collector config before patching
+#
+# WRITE permissions (needed for auto-remediation):
+#   deployments patch/update — restart_service + add_db_instrumentation annotation
+#   configmaps create/update/patch — patch_collector_config
+#   instrumentations create/patch — add_db_instrumentation (OTel Operator CR)
+#
+# Scope: ClusterRole so the agent can operate across the application namespace
+# (e.g. "production") and the collector namespace (e.g. "monitoring") independently
+# of the namespace it is deployed into.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+rules:
+  # ── Core: read cluster state ─────────────────────────────────────────────────
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - nodes
+      - namespaces
+      - endpoints
+    verbs: ["get", "list", "watch"]
+
+  # ConfigMaps: read all, write only in namespaces the agent manages
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── Apps: service restarts + deployment annotation patching ──────────────────
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # ── Batch: CronJob visibility ─────────────────────────────────────────────────
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "watch"]
+
+  # ── OpenTelemetry Operator: Instrumentation CRs ───────────────────────────────
+  # Required by add_db_instrumentation to create OTel SDK auto-instrumentation CRs.
+  # These CRs tell the OTel Operator which language SDK to inject into a pod.
+  # Safe to include even if the OTel Operator is not installed — the rule is a no-op
+  # if the CRD does not exist.
+  - apiGroups: ["opentelemetry.io"]
+    resources: ["instrumentations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ── Metrics (optional, for collector health checks) ───────────────────────────
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+    # This rule fails silently if the Metrics Server is not installed — acceptable.
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "o11y-agent.fullname" . }}
+  labels:
+    {{- include "o11y-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "o11y-agent.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "o11y-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

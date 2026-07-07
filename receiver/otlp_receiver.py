@@ -157,8 +157,12 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             from streaming import profiling_store as ps
             env = environment or (pipeline.environment if hasattr(pipeline, "environment") else "")
             services = ps.get_services(env) if env else []
+            flamegraphs = {}
+            for svc in services:
+                frames = ps.get_flamegraph(svc, env)
+                flamegraphs[svc] = {"frame_count": len(frames), "top_frame": frames[0] if frames else None}
             return Response(
-                json.dumps({"environment": env, "profiling_services": services}),
+                json.dumps({"environment": env, "profiling_services": services, "flamegraphs": flamegraphs}),
                 status=200, mimetype="application/json",
             )
         except Exception as exc:

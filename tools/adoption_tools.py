@@ -172,28 +172,34 @@ def get_sdk_coverage() -> str:
 
 SCHEMAS: list[dict] = [
     {
-        "name": "get_broken_detectors",
-        "description": (
-            "List detectors that are disabled or have no notification rules configured. "
-            "These will never alert on-call when they fire."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "toolSpec": {
+            "name": "get_broken_detectors",
+            "description": (
+                "List detectors that are disabled or have no notification rules configured. "
+                "These will never alert on-call when they fire."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
+        }
     },
     {
-        "name": "get_token_health",
-        "description": (
-            "Check for expired or soon-to-expire API/ingest tokens. "
-            "An expired token silently breaks data ingestion with no dashboard warning."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "toolSpec": {
+            "name": "get_token_health",
+            "description": (
+                "Check for expired or soon-to-expire API/ingest tokens. "
+                "An expired token silently breaks data ingestion with no dashboard warning."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
+        }
     },
     {
-        "name": "get_sdk_coverage",
-        "description": (
-            "Query which OTel SDK languages and versions are in use across the org. "
-            "Flags pre-1.0 (unstable semconv) SDK versions that cause attribute coverage gaps."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "toolSpec": {
+            "name": "get_sdk_coverage",
+            "description": (
+                "Query which OTel SDK languages and versions are in use across the org. "
+                "Flags pre-1.0 (unstable semconv) SDK versions that cause attribute coverage gaps."
+            ),
+            "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}},
+        }
     },
 ]
 

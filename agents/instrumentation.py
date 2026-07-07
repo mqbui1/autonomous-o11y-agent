@@ -61,7 +61,7 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
             pass
         return result_str
 
-    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s["name"] == "get_sdk_coverage"] + [SUBMIT_SCHEMA]
+    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s.get("toolSpec", {}).get("name") == "get_sdk_coverage"] + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
         "analyze_instrumentation": _capturing_analyze,

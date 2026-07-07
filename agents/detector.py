@@ -43,7 +43,7 @@ Leave actions_taken empty if this is a dry-run with no changes applied.
 
 def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     collector: dict = {}
-    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s["name"] == "get_broken_detectors"] + [SUBMIT_SCHEMA]
+    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s.get("toolSpec", {}).get("name") == "get_broken_detectors"] + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
         "get_broken_detectors": ADOPTION_FNS["get_broken_detectors"],

@@ -173,7 +173,9 @@ def _decode_pprof(b64: str) -> list[dict]:
         fields = _parse_fields(raw)
 
         # string_table: field 6
-        strings: list[str] = [""]
+        # pprof spec: string_table[0] is always "" and IS included in the proto wire bytes.
+        # Do NOT pre-seed — let the first field-6 entry provide index 0 naturally.
+        strings: list[str] = []
         for wt, val in fields.get(6, []):
             if wt == 2 and isinstance(val, bytes):
                 strings.append(val.decode("utf-8", errors="replace"))
@@ -232,7 +234,8 @@ def _decode_pprof(b64: str) -> list[dict]:
         frames = []
         for fid, cnt in sorted(counts.items(), key=lambda x: -x[1]):
             name, file_, sline = fns.get(fid, ("", "", 0))
-            if not name:
+            # Skip empty names, the V8 idle marker, and zero-sample frames
+            if not name or name == "(idle)" or cnt <= 0:
                 continue
             frames.append({"function": name, "file": file_, "line": sline, "samples": cnt})
         return frames[:30]

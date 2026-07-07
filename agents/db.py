@@ -66,9 +66,24 @@ Run a complete database and dependency assessment:
    These reveal which outbound calls are latency bottlenecks.
 
 After completing all checks, call submit_findings with:
-- summary: 2-4 sentences: how many inferred (unmonitored) dependencies exist, which services
-  have the worst db instrumentation, any high outbound error rates.
-- issues: one per critical finding (inferred blind-spot dependencies, missing db attrs, high error rates)
+- summary: 2-4 sentences: how many services have DB instrumentation gaps, which specific services
+  are affected, which DB technologies are in use, any high outbound error rates.
+- issues: One issue PER SERVICE that is missing db.* attributes. Do NOT create a single
+  org-wide issue — create individual issues so each service can be remediated separately.
+  For each service with missing db.* attrs:
+    - service: the service name (e.g. "cartservice")
+    - severity: "high" for partial coverage, "critical" if the service makes heavy DB calls
+    - description: "Missing db instrumentation for <service>: db.system, db.name, db.operation
+      attrs absent. DB technology: <db_systems from find_db_instrumented_services, or 'unknown
+      — inferred from operation names' if none found>. Cannot attribute slow queries to specific
+      databases in APM."
+    - recommendation: numbered steps — (1) Install the OTel instrumentation library for
+      <db_systems> (2) Enable db.statement capture if needed (3) Redeploy and verify
+      db.system, db.name, db.operation appear in APM trace spans.
+    - action_tool: "add_db_instrumentation"
+    - action_args: {"db_systems": [<list from find_db_instrumented_services details, or []>],
+                    "missing_attributes": [<list of missing attrs>]}
+  Also create issues for inferred blind-spot dependencies and high outbound error rates as before.
 - services_active: instrumented services discovered in the topology
 - metrics: {
     "inferred_dependency_count": <count of unmonitored inferred services>,
