@@ -17,11 +17,19 @@ span-based pattern analysis still runs and can surface N+1 and hotspot patterns.
 
 import json
 import logging
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
 from ._runner import get_config
+
+# Local profiling store (populated from OTLP fan-out)
+try:
+    sys.path.insert(0, "/app")
+    from streaming import profiling_store as _profiling_store
+except Exception:
+    _profiling_store = None
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +105,19 @@ def get_profiling_services(environment: str) -> str:
     Args:
         environment: Deployment environment name.
     """
+    # Try local store first (populated from OTLP fan-out via OTel Collector)
+    if _profiling_store is not None:
+        local_services = _profiling_store.get_services(environment)
+        if local_services:
+            return json.dumps({
+                "profiling_available": True,
+                "source": "local_otlp_capture",
+                "environment": environment,
+                "service_count": len(local_services),
+                "services": [{"name": s, "types": ["cpu"]} for s in local_services],
+                "note": "Data from local OTLP fan-out capture (last 10 minutes).",
+            }, indent=2)
+
     try:
         data = _api(f"{_PROFILING_API}/services?environment={environment}&limit=100")
         services = data.get("services", [])
@@ -145,6 +166,26 @@ def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 6
     """
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - lookback_minutes * 60 * 1000
+
+    # Try local store first (populated from OTLP fan-out via OTel Collector)
+    if _profiling_store is not None:
+        local_frames = _profiling_store.get_flamegraph(service, environment)
+        if local_frames:
+            total_samples = sum(f["samples"] for f in local_frames)
+            return json.dumps({
+                "service": service,
+                "environment": environment,
+                "profiling_available": True,
+                "source": "local_otlp_capture",
+                "lookback_minutes": lookback_minutes,
+                "total_cpu_samples": total_samples,
+                "top_frames": local_frames,
+                "interpretation": (
+                    "Frames with high sample counts are consuming the most CPU time. "
+                    "Look for application code frames (not framework/stdlib) with >5% CPU — "
+                    "these are your optimization targets."
+                ),
+            }, indent=2)
 
     try:
         payload = {

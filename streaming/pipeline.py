@@ -21,6 +21,7 @@ from .attribute_checker import AttributeChecker
 from .cardinality_tracker import CardinalityTracker
 from .service_tracker import ServiceTracker
 from .log_tracker import LogTracker
+from . import profiling_store
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,20 @@ class StreamingPipeline:
                     body_container = record.get("body", {})
                     body = body_container.get("stringValue", "") or str(body_container)
                     record_attrs = _parse_attributes(record.get("attributes", []))
+
+                    # Route profiling records to the local profiling store
+                    if record_attrs.get("com.splunk.sourcetype") == "otel.profiling":
+                        data_type = record_attrs.get("profiling.data.type", "cpu")
+                        data_format = record_attrs.get("profiling.data.format", "")
+                        environment = resource_attrs.get("deployment.environment", "unknown")
+                        profiling_store.observe(
+                            service=service,
+                            environment=environment,
+                            data_type=data_type,
+                            body=body,
+                            data_format=data_format,
+                        )
+                        continue
 
                     self.log_tracker.observe_log(
                         service=service,

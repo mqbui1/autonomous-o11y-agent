@@ -98,8 +98,12 @@ exporters:
 
   # Secondary fan-out → O11y Agent streaming receiver
   # Queued so agent latency never blocks the primary Splunk export path.
+  # encoding: json required — agent receiver only handles JSON, not protobuf.
+  # compression: none required — Flask receiver doesn't auto-decompress gzip.
   otlphttp/agent:
     endpoint: "http://o11y-agent:4318"
+    encoding: json
+    compression: none
     sending_queue:
       enabled: true
       num_consumers: 2
