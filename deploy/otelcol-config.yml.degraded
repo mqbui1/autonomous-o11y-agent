@@ -1,5 +1,6 @@
-# Splunk Gateway OTel Collector Config
-# Receives OTLP from all Astronomy Shop services and exports to Splunk O11y Cloud.
+# Splunk Gateway OTel Collector Config — DEGRADED STATE (demo Act 1)
+# Missing: host.name stamping, deployment.environment span tag promotion
+# This config intentionally omits fixes so the agent can detect the gaps.
 
 extensions:
   health_check:
@@ -43,31 +44,21 @@ processors:
     check_interval: 2s
     limit_mib: 200
 
-  # Stamp every span/metric/log with deployment.environment = $SPLUNK_ENVIRONMENT
-  # This scopes all telemetry to the environment the agent will query.
+  # DEGRADED: sf_environment not set — services appear in wrong/no environment bucket
   resource/add_environment:
     attributes:
       - action: upsert
         value: "${SPLUNK_ENVIRONMENT}"
         key: deployment.environment
-      - action: upsert
-        value: "${SPLUNK_ENVIRONMENT}"
-        key: sf_environment
 
+  # DEGRADED: override: false — system detector won't stamp host.name when SDK omits it
   resourcedetection:
     detectors: [env, system]
     timeout: 10s
-    override: true
+    override: false
 
-  # Promote key resource attributes → span attributes so they appear in
-  # Splunk's span tag store and APM metric dimensions (spans.count, etc.).
-  transform/promote_env_to_span:
-    trace_statements:
-      - context: span
-        statements:
-          - set(attributes["deployment.environment"], resource.attributes["deployment.environment"])
-          - set(attributes["host.name"], resource.attributes["host.name"])
-          - set(attributes["host.id"], resource.attributes["host.id"])
+  # DEGRADED: transform/promote_env_to_span is absent
+  # deployment.environment will NOT appear as a span tag in Splunk APM
 
 exporters:
   # Traces → Splunk APM
@@ -81,15 +72,12 @@ exporters:
     access_token: "${SPLUNK_INGEST_TOKEN}"
     realm: "${SPLUNK_REALM}"
     sync_host_metadata: false
-    send_otlp_histograms: true   # required for latency histogram charts
+    send_otlp_histograms: true
     timeout: 30s
-    idle_conn_timeout: 60s       # force reconnect before Docker NAT drops the connection
-    http2_read_idle_timeout: 30s # send pings on idle to detect dead connections early
-    http2_ping_timeout: 10s      # fail fast if ping goes unanswered
+    idle_conn_timeout: 60s
+    http2_read_idle_timeout: 30s
+    http2_ping_timeout: 10s
 
-  # AlwaysOn Profiling → Splunk APM profiling backend (HEC format)
-  # Uses Authorization: Splunk header (unlike X-SF-Token used for metrics/traces).
-  # SPLUNK_ACCESS_TOKEN is required here — not SPLUNK_INGEST_TOKEN.
   splunk_hec/profiling:
     token: "${SPLUNK_INGEST_TOKEN}"
     endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
@@ -97,7 +85,6 @@ exporters:
     profiling_data_enabled: true
 
   # Secondary fan-out → O11y Agent streaming receiver
-  # Queued so agent latency never blocks the primary Splunk export path.
   otlphttp/agent:
     endpoint: "http://o11y-agent:4318"
     sending_queue:
@@ -114,19 +101,14 @@ service:
   telemetry:
     metrics:
       level: detailed
-      readers:
-        - pull:
-            exporter:
-              prometheus:
-                host: 0.0.0.0
-                port: 8888
+      address: 0.0.0.0:8888
 
   extensions: [health_check, http_forwarder, zpages]
 
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span]
+      processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
       exporters: [otlphttp/traces, signalfx, otlphttp/agent]
 
     metrics:

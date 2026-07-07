@@ -99,6 +99,12 @@ exporters:
     http2_read_idle_timeout: 30s
     http2_ping_timeout: 10s
 
+  splunk_hec/profiling:
+    token: "${SPLUNK_INGEST_TOKEN}"
+    endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
+    log_data_enabled: false
+    profiling_data_enabled: true
+
   otlphttp/agent:
     endpoint: "http://o11y-agent:4318"
     sending_queue:
@@ -115,7 +121,12 @@ service:
   telemetry:
     metrics:
       level: detailed
-      address: 0.0.0.0:8888
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
 
   extensions: [health_check, http_forwarder, zpages]
 
@@ -132,8 +143,8 @@ service:
 
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
-      exporters: [otlphttp/agent]
+      processors: [memory_limiter, batch, resourcedetection]
+      exporters: [splunk_hec/profiling, otlphttp/agent]
 
     metrics/internal:
       receivers: [prometheus/internal]
