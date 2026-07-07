@@ -1,6 +1,85 @@
 # Autonomous O11y Agent
 
-Runs nine specialist AI agents in parallel against Splunk Observability Cloud, then synthesizes their findings into a prioritized assessment. Supports AWS Bedrock and any OpenAI-compatible LLM.
+Runs ten specialist AI agents in parallel against Splunk Observability Cloud, then synthesizes their findings into a prioritized assessment with automated remediations. Supports AWS Bedrock and any OpenAI-compatible LLM.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Sources["📡 Telemetry Sources"]
+        SVC[Application Services\nOTel SDK]
+        COLL[Splunk OTel Collector\ntraces · metrics · profiling logs]
+        SVC -->|OTLP| COLL
+    end
+
+    subgraph Splunk["☁️ Splunk Observability Cloud"]
+        APM[APM / Traces]
+        IM[Infrastructure Metrics]
+        PROF[AlwaysOn Profiling]
+        RUM_S[RUM]
+        SYN[Synthetics]
+        LOG[Log Observer]
+        DET[Detectors / Alerts]
+        COLL -->|traces| APM
+        COLL -->|metrics| IM
+        COLL -->|profiling logs via splunk_hec| PROF
+    end
+
+    subgraph Agent["🤖 Autonomous O11y Agent"]
+        COORD[Coordinator\norchestrates parallel runs]
+        subgraph Specialists["10 Specialist Agents  (Claude via Bedrock / OpenAI)"]
+            S1[⚡ Performance\nprofiling · N+1 · code fix]
+            S2[❤️ Health\nerrors · latency · collector]
+            S3[🔬 Instrumentation\nspan quality · attribute coverage]
+            S4[⚖️ Governance\ncardinality · MTS growth]
+            S5[🚨 Detector\ndark services · provisioning]
+            S6[📋 Logs\nerror patterns · volume]
+            S7[🌐 RUM\nJS errors · Core Web Vitals]
+            S8[🔍 RCA\nincident · causal chain]
+            S9[🤖 Synthetics\ncoverage · failures]
+            S10[🗄️ DB/Dependency\ntopology · db.* attrs]
+        end
+        REM[Remediation Engine\nrule-based action mapping]
+        SYNTH[Synthesis\ncross-domain narrative]
+        STATE[State Store\nrun history · trend context]
+        COORD --> Specialists
+        Specialists --> REM
+        Specialists --> SYNTH
+        REM --> STATE
+        SYNTH --> STATE
+    end
+
+    subgraph UI["🖥️ Supervisor UI"]
+        DASH[Assessment Dashboard\npriority issues · scorecards]
+        REMUI[Pending Remediations\nApply / Preview buttons]
+        CHAT[Chat Interface\nnatural-language queries]
+        STATE -->|GET /api/assessment/latest| DASH
+        STATE --> REMUI
+        STATE --> CHAT
+    end
+
+    subgraph Actions["⚙️ ActionEngine"]
+        A1[create_splunk_detector]
+        A2[build_detectors]
+        A3[add_db_instrumentation]
+        A4[reload_collector]
+        A5[restart_service]
+        A6[generate_code_fix]
+        A7[rebaseline_detectors]
+    end
+
+    APM -->|API queries| S2 & S3 & S8 & S10 & S1
+    IM -->|SignalFlow| S3 & S4
+    PROF -->|flame graphs| S1
+    RUM_S -->|session data| S7
+    SYN -->|test results| S9
+    LOG -->|error logs| S6
+    DET -->|alert history| S5
+
+    REMUI -->|approve & apply| Actions
+    Actions -->|update| Splunk
+    Actions -->|redeploy| Sources
+```
 
 ## Quick start
 
@@ -52,6 +131,20 @@ See [deploy/README.md](deploy/README.md) for full setup instructions.
 | **RCA** | Active incident investigation, causal chain analysis, change correlation |
 | **Synthetics** | Test coverage gaps, failing tests, degrading performance trends |
 | **DB/Dependency** | Inferred service topology, slow outbound calls, `db.*` attribute coverage |
+| **Performance** | AlwaysOn Profiling hotspots, N+1 query patterns, latency outliers, code-level fix generation |
+
+### Performance specialist tiers
+
+The performance specialist degrades gracefully based on available data:
+
+| Tier | Requires | Output |
+|---|---|---|
+| **A** | AlwaysOn Profiling + source code | Exact file:line diff ready to apply |
+| **B** | AlwaysOn Profiling only | file:line:function with precise fix description |
+| **C** | Span patterns only (always available) | Operation-level N+1 / latency fix recommendation |
+| **D** | Nothing detectable | Skipped — no findings emitted |
+
+Configure source code access via `SOURCE_ROOT` (local path) or `GITHUB_TOKEN` + `GITHUB_REPO`.
 
 ## Deployment modes
 
@@ -95,14 +188,16 @@ Each remediation includes:
 
 The Supervisor UI surfaces these as a **Pending Remediations** panel with per-item Apply buttons and a bulk "Apply Selected" option. Chat also accepts natural-language remediation requests ("apply the detector fix for checkout-service").
 
-| Issue pattern | Action |
-|---|---|
-| No detector / dark service (per-service) | `create_splunk_detector` (error_rate + latency) |
-| No detector coverage (org-wide) | `build_detectors` |
-| OTel Collector unreachable | `reload_collector` |
-| DB span attributes stripped (`db.system` missing) | `patch_collector_config` (remove transform/strip_db_attrs) |
-| Silent service / no telemetry | `restart_service` |
-| Detector threshold too tight / noisy | `rebaseline_detectors` |
+| Issue pattern | Action | Auto? |
+|---|---|---|
+| No detector / dark service (per-service) | `create_splunk_detector` (error_rate + latency) | ✅ |
+| No detector coverage (org-wide) | `build_detectors` | ✅ |
+| OTel Collector unreachable | `reload_collector` | ✅ |
+| DB instrumentation missing (`db.system` absent) | `add_db_instrumentation` | ✅ |
+| DB span attributes stripped by collector processor | `patch_collector_config` | ⬜ |
+| Silent service / no telemetry | `restart_service` | ✅ |
+| Detector threshold too tight / noisy | `rebaseline_detectors` | ✅ |
+| Performance hotspot with profiling data | `generate_code_fix` (file:line diff) | ⬜ |
 
 ## Supervisor UI integration
 
