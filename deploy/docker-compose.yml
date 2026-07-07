@@ -533,8 +533,11 @@ services:
       - OTEL_SERVICE_NAME=recommendation
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       # AlwaysOn Profiling — Python, requires splunk-opentelemetry[all] package
+      # Note: SPLUNK_PROFILER_LOGS_ENDPOINT is intentionally omitted for Python.
+      # Python splunk_otel maps it to OTEL_EXPORTER_OTLP_LOGS_ENDPOINT which
+      # uses the gRPC exporter protocol — gRPC on port 4318 (HTTP) would fail.
+      # Without this var, profiling logs use the main gRPC endpoint (4317) instead.
       - SPLUNK_PROFILER_ENABLED=true
-      - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
     depends_on:
       otel-collector:
         condition: service_started

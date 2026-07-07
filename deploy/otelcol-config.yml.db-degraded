@@ -105,8 +105,12 @@ exporters:
     log_data_enabled: false
     profiling_data_enabled: true
 
+  # encoding: json required — agent receiver only handles JSON, not protobuf.
+  # compression: none required — Flask receiver doesn't auto-decompress gzip.
   otlphttp/agent:
     endpoint: "http://o11y-agent:4318"
+    encoding: json
+    compression: none
     sending_queue:
       enabled: true
       num_consumers: 2

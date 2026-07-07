@@ -33,6 +33,10 @@ trigger_event = threading.Event()
 # Set while an assessment is actively running; cleared when it finishes.
 _running_lock = threading.Lock()
 _assessment_running = False
+_assessment_progress: dict = {
+    "phase": "idle", "completed": 0, "total": 0,
+    "completed_specialists": [], "started_at": None,
+}
 
 
 def set_assessment_running(value: bool) -> None:
@@ -44,6 +48,25 @@ def set_assessment_running(value: bool) -> None:
 def is_assessment_running() -> bool:
     with _running_lock:
         return _assessment_running
+
+
+def reset_assessment_progress(total: int = 9) -> None:
+    import time as _t
+    with _running_lock:
+        _assessment_progress.update({
+            "phase": "starting", "completed": 0, "total": total,
+            "completed_specialists": [], "started_at": _t.time(),
+        })
+
+
+def update_assessment_progress(phase: str, completed: int | None = None,
+                                name: str | None = None) -> None:
+    with _running_lock:
+        _assessment_progress["phase"] = phase
+        if completed is not None:
+            _assessment_progress["completed"] = completed
+        if name and name not in _assessment_progress["completed_specialists"]:
+            _assessment_progress["completed_specialists"].append(name)
 
 
 def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
@@ -124,6 +147,26 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
     def healthz():
         return Response("ok", status=200)
 
+    @app.get("/api/profiling/status")
+    def profiling_status():
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import profiling_store as ps
+            env = environment or (pipeline.environment if hasattr(pipeline, "environment") else "")
+            services = ps.get_services(env) if env else []
+            return Response(
+                json.dumps({"environment": env, "profiling_services": services}),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(
+                json.dumps({"error": str(exc)}),
+                status=500, mimetype="application/json",
+            )
+
     # ── Assessment API (serves UI data to the Supervisor) ─────────────────────
 
     @app.get("/api/assessment/latest")
@@ -189,8 +232,10 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
     def assessment_running_status():
         running = is_assessment_running()
         queued = trigger_event.is_set()
+        with _running_lock:
+            progress = dict(_assessment_progress)
         return Response(
-            json.dumps({"running": running, "queued": queued}),
+            json.dumps({"running": running, "queued": queued, "progress": progress}),
             status=200, mimetype="application/json",
         )
 
