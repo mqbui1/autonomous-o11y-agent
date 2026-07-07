@@ -121,11 +121,14 @@ def _infer_action(
         }
 
     # ── Performance / code-level fix (from performance specialist) ───────────────
-    # Only map to generate_code_fix when action_tool is explicitly set — other
-    # performance-domain findings (e.g. detector gaps) should fall through to
-    # their own handlers rather than being mislabeled as "Code Fix".
+    # Only map to generate_code_fix when action_tool is explicitly set AND the
+    # specialist provided actual code location data (file or function). Without
+    # those, it's a mislabeled config/instrumentation finding — drop it so it
+    # doesn't appear as a meaningless manual "Code Fix" in the UI.
     if getattr(issue, "action_tool", "") == "generate_code_fix":
         args = getattr(issue, "action_args", {}) or {}
+        if not args.get("file") and not args.get("function") and not args.get("pattern"):
+            return None  # no code location — not a real code fix
         return {
             "action_type": "generate_code_fix",
             "payload": {
