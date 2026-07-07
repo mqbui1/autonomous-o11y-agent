@@ -4,6 +4,7 @@ from config import AgentConfig
 from agent_loop import run_agent
 from providers import get_provider
 from tools.provisioner import SCHEMAS, TOOL_FNS
+from tools.adoption_tools import SCHEMAS as ADOPTION_SCHEMAS, TOOL_FNS as ADOPTION_FNS
 from tools.findings import SUBMIT_SCHEMA, SpecialistFindings, make_submit_fn
 
 _SYSTEM = """\
@@ -28,9 +29,8 @@ Run a complete detector lifecycle assessment:
    Use default parameters (do NOT set reconcile=True or skip_baseline=True unless explicitly \
    requested). If the tool returns a timeout error, report what you have — do NOT retry.
 2. audit_detectors — check quality of any existing service detectors
-
-After completing both checks, call submit_findings with your structured results.
-In issues, include every dark (uncovered) service and every failing detector.
+3. get_broken_detectors — find detectors with no notification rules or that are disabled.
+   Flag these as high-severity issues: a detector that fires to nobody is a broken smoke alarm.
 In metrics, include:
   - deployed_count: total detectors deployed or verified
   - dark_service_count: services with no detector coverage
@@ -43,9 +43,10 @@ Leave actions_taken empty if this is a dry-run with no changes applied.
 
 def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     collector: dict = {}
-    all_schemas = SCHEMAS + [SUBMIT_SCHEMA]
+    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s["name"] == "get_broken_detectors"] + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
+        "get_broken_detectors": ADOPTION_FNS["get_broken_detectors"],
         "submit_findings": make_submit_fn(collector, "detector"),
     }
 

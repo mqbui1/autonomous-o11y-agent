@@ -6,6 +6,7 @@ from config import AgentConfig
 from agent_loop import run_agent
 from providers import get_provider
 from tools.analyzer import SCHEMAS, TOOL_FNS
+from tools.adoption_tools import SCHEMAS as ADOPTION_SCHEMAS, TOOL_FNS as ADOPTION_FNS
 from tools.findings import SUBMIT_SCHEMA, SpecialistFindings, make_submit_fn
 
 _SYSTEM = """\
@@ -27,6 +28,9 @@ Always report specific attribute names, coverage percentages, and exact fixes.
 _TASK = """\
 Run a complete instrumentation quality assessment:
 1. analyze_instrumentation — score APM, metrics, and logs; find all attribute gaps
+2. get_sdk_coverage — check which OTel SDK languages/versions are in use org-wide.
+   Flag any pre-1.0 (pre-stable) SDK versions as high severity — they use unstable
+   semantic conventions that cause attribute name mismatches and APM gaps.
 
 After completing your analysis, call submit_findings with your structured results.
 NOTE: Do NOT set instrumentation_score — it is computed automatically from the
@@ -57,10 +61,11 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
             pass
         return result_str
 
-    all_schemas = SCHEMAS + [SUBMIT_SCHEMA]
+    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s["name"] == "get_sdk_coverage"] + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
         "analyze_instrumentation": _capturing_analyze,
+        "get_sdk_coverage": ADOPTION_FNS["get_sdk_coverage"],
         "submit_findings": make_submit_fn(collector, "instrumentation"),
     }
 
