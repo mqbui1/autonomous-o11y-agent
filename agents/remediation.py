@@ -83,7 +83,9 @@ def _infer_action(
 
     # ── Detector provisioning ─────────────────────────────────────────────────
     if (
-        _match(desc, ["no detector", "no alert", "dark service", "detector coverage", "uncovered"])
+        _match(desc, ["no detector", "zero detector", "no alert", "no automated alert",
+                      "dark service", "detector coverage", "uncovered", "without.*detector",
+                      "deploy.*detector", "deploy error-rate detector"])
         or getattr(issue, "action_tool", "") == "provision_detectors"
         or domain == "detector"
     ):
@@ -118,8 +120,57 @@ def _infer_action(
             "_topic": "collector",
         }
 
-    # ── DB span attributes stripped ───────────────────────────────────────────
-    if _match(desc, ["db.system", "database span", "db attr", "db span attribute"]):
+    # ── Performance / code-level fix (from performance specialist) ───────────────
+    # Only map to generate_code_fix when action_tool is explicitly set — other
+    # performance-domain findings (e.g. detector gaps) should fall through to
+    # their own handlers rather than being mislabeled as "Code Fix".
+    if getattr(issue, "action_tool", "") == "generate_code_fix":
+        args = getattr(issue, "action_args", {}) or {}
+        return {
+            "action_type": "generate_code_fix",
+            "payload": {
+                "service": svc,
+                "file": args.get("file", ""),
+                "line": args.get("line", 0),
+                "function": args.get("function", ""),
+                "pattern": args.get("pattern", ""),
+                "db_system": args.get("db_system", ""),
+                "suggested_diff": args.get("suggested_diff", ""),
+                "fix_description": args.get("fix_description", issue.description),
+            },
+            "description": args.get("fix_description") or issue.description,
+            "auto_applicable": False,  # always human-reviewed — LLM-generated code
+            "_topic": f"perf_{args.get('pattern', 'hotspot')}_{(args.get('file', '') or svc)[-20:]}",
+        }
+
+    # ── DB instrumentation gap (services never had db.* attrs — OTel library missing) ──
+    if domain == "db" and _match(desc, [
+        "missing db instrumentation", "db instrumentation", "db blind spot",
+        "db.system, db.name, db.operation", "db technology", "db calls with no db",
+    ]):
+        db_systems = getattr(issue, "action_args", {}).get("db_systems", [])
+        missing_attrs = getattr(issue, "action_args", {}).get(
+            "missing_attributes", ["db.system", "db.name", "db.operation"]
+        )
+        return {
+            "action_type": "add_db_instrumentation",
+            "payload": {
+                "service": svc,
+                "db_systems": db_systems,
+                "missing_attributes": missing_attrs,
+            },
+            "description": (
+                f"Add OTel DB instrumentation for {svc} — "
+                f"db_systems: {db_systems or ['unknown']} — "
+                f"missing: {missing_attrs}"
+            ),
+            "auto_applicable": True,
+            "_topic": "db_instrumentation",
+        }
+
+    # ── DB span attributes stripped by collector processor ────────────────────
+    if _match(desc, ["strip_db_attrs", "db attr stripped", "db span attribute stripped",
+                     "transform/strip", "collector stripping"]):
         return {
             "action_type": "patch_collector_config",
             "payload": {

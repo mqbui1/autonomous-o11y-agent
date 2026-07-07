@@ -1,5 +1,7 @@
 """Instrumentation specialist — span/metric/log attribute quality scoring."""
 
+import json
+
 from config import AgentConfig
 from agent_loop import run_agent
 from providers import get_provider
@@ -27,18 +29,38 @@ Run a complete instrumentation quality assessment:
 1. analyze_instrumentation — score APM, metrics, and logs; find all attribute gaps
 
 After completing your analysis, call submit_findings with your structured results.
-In instrumentation_score, provide your 0-100 overall quality score.
+NOTE: Do NOT set instrumentation_score — it is computed automatically from the
+analyzer output. Focus on quality narrative in summary.
 In issues, include every gap ranked by severity with the exact fix.
 In services_silent, list services with no traces or metrics.
-In metrics, include: score, span_coverage_pct, and any other key percentages.
+In metrics, include: apm_score, metrics_score, logs_score, span_coverage_pct,
+and any other key percentages extracted directly from the analyzer JSON output.
 """
 
 
 def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     collector: dict = {}
+    # Capture the raw analyzer JSON so we can extract deterministic scores
+    # without relying on the LLM to pick a number.
+    _raw_analyzer: dict = {}
+
+    _orig_analyze = TOOL_FNS["analyze_instrumentation"]
+
+    def _capturing_analyze(**kwargs):
+        result_str = _orig_analyze(**kwargs)
+        try:
+            data = json.loads(result_str)
+            # Keep the latest call (all-services scan is typically the first/only call)
+            if "correlation" in data:
+                _raw_analyzer.update(data)
+        except Exception:
+            pass
+        return result_str
+
     all_schemas = SCHEMAS + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
+        "analyze_instrumentation": _capturing_analyze,
         "submit_findings": make_submit_fn(collector, "instrumentation"),
     }
 
@@ -54,6 +76,18 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     if "instrumentation" in collector:
         result = collector["instrumentation"]
         result.raw_text = raw_text
+        # Override the LLM-chosen score with the analyzer's own computed value.
+        # combined_score is the average of apm/metrics/logs scores — fully deterministic.
+        if _raw_analyzer:
+            corr = _raw_analyzer.get("correlation", {})
+            computed = corr.get("combined_score")
+            if computed is not None:
+                result.instrumentation_score = int(computed)
+            # Inject sub-scores into metrics so the UI and trend context can show them
+            result.metrics.setdefault("apm_score", _raw_analyzer.get("apm", {}).get("score", 0))
+            result.metrics.setdefault("metrics_score", _raw_analyzer.get("metrics", {}).get("score", 0))
+            result.metrics.setdefault("logs_score", _raw_analyzer.get("logs", {}).get("score", 0))
+            result.metrics["score"] = result.instrumentation_score  # keep "score" alias in sync
         return result
 
     return SpecialistFindings(

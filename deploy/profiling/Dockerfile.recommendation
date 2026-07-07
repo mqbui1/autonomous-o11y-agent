@@ -1,0 +1,18 @@
+# Recommendation — Python 3.14 with Splunk OTel distro for AlwaysOn Profiling
+#
+# pip is present in the venv, so no multi-stage build is needed.
+# We install splunk-opentelemetry[all] which adds CPU profiling support,
+# then set OTEL_PYTHON_CONFIGURATOR so the existing opentelemetry-instrument
+# entrypoint uses the Splunk configurator (no CMD change required).
+
+FROM ghcr.io/open-telemetry/demo:latest-recommendation
+
+# Install Splunk OTel Python distro into the existing venv
+RUN /venv/bin/pip install --no-cache-dir "splunk-opentelemetry[all]"
+
+# Bootstrap installs any missing auto-instrumentation libraries
+RUN /venv/bin/splunk-py-trace-bootstrap || true
+
+# Tell opentelemetry-instrument to use the Splunk configurator,
+# which activates AlwaysOn Profiling when SPLUNK_PROFILER_ENABLED=true.
+ENV OTEL_PYTHON_CONFIGURATOR=splunk_configurator

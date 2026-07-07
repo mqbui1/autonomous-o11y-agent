@@ -1,0 +1,21 @@
+# Frontend — Node.js v24 with Splunk OTel distro for AlwaysOn Profiling
+#
+# The base image is distroless (no npm). We install @splunk/otel in a builder
+# stage that matches the Node.js version, then copy only the package into the
+# final image's existing node_modules directory.
+
+# ── Stage 1: install @splunk/otel ────────────────────────────────────────────
+FROM node:24-alpine AS builder
+WORKDIR /install
+RUN npm install @splunk/otel
+
+# ── Stage 2: final image ──────────────────────────────────────────────────────
+FROM ghcr.io/open-telemetry/demo:latest-frontend
+
+# Copy Splunk OTel package and its dependencies into the app's node_modules
+COPY --from=builder /install/node_modules /app/node_modules
+
+# Replace the standard OTel Instrumentation.js require with @splunk/otel/instrument.
+# @splunk/otel wraps the standard SDK and adds CPU/heap AlwaysOn Profiling.
+# SPLUNK_PROFILER_ENABLED=true (set in docker-compose) activates the profiler.
+CMD ["--require=@splunk/otel/instrument", "server.js"]

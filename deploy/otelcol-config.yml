@@ -87,14 +87,14 @@ exporters:
     http2_read_idle_timeout: 30s # send pings on idle to detect dead connections early
     http2_ping_timeout: 10s      # fail fast if ping goes unanswered
 
-  # Logs → Splunk O11y Log Observer (OTLP format)
-  # NOTE: Requires Splunk Cloud/Enterprise as Log Observer backend.
-  # Disabled until a Splunk Cloud instance is available — ingest.signalfx.com/v1/log returns 404
-  # without a Cloud deployment. Re-enable by adding otlphttp/logs back to the logs pipeline.
-  # otlphttp/logs:
-  #   logs_endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
-  #   headers:
-  #     "X-SF-Token": "${SPLUNK_INGEST_TOKEN}"
+  # AlwaysOn Profiling → Splunk APM profiling backend (HEC format, NOT OTLP)
+  # The Splunk ingest /v1/log endpoint speaks HEC, not OTLP — use splunk_hec exporter.
+  # No Splunk Cloud/Enterprise required; the profiling feature is in Observability Cloud APM.
+  splunk_hec/profiling:
+    token: "${SPLUNK_INGEST_TOKEN}"
+    endpoint: "https://ingest.${SPLUNK_REALM}.signalfx.com/v1/log"
+    log_data_enabled: false        # don't forward general log data
+    profiling_data_enabled: true   # only forward profiling records
 
   # Secondary fan-out → O11y Agent streaming receiver
   # Queued so agent latency never blocks the primary Splunk export path.
@@ -114,7 +114,12 @@ service:
   telemetry:
     metrics:
       level: detailed
-      address: 0.0.0.0:8888
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
 
   extensions: [health_check, http_forwarder, zpages]
 
@@ -132,7 +137,7 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch, resourcedetection, resource/add_environment]
-      exporters: [otlphttp/agent]  # otlphttp/logs disabled — needs Splunk Cloud/Enterprise
+      exporters: [splunk_hec/profiling, otlphttp/agent]
 
     metrics/internal:
       receivers: [prometheus/internal]
