@@ -5,80 +5,34 @@ Runs ten specialist AI agents in parallel against Splunk Observability Cloud, th
 ## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Sources["📡 Telemetry Sources"]
-        SVC[Application Services\nOTel SDK]
-        COLL[Splunk OTel Collector\ntraces · metrics · profiling logs]
-        SVC -->|OTLP| COLL
+flowchart LR
+    COLL["OTel Collector"]
+
+    subgraph Splunk["Splunk Observability Cloud"]
+        APM["APM · Profiling"]
+        IM["Infra Metrics"]
+        RUM["RUM · Synthetics"]
+        LOGS["Logs · Detectors"]
     end
 
-    subgraph Splunk["☁️ Splunk Observability Cloud"]
-        APM[APM / Traces]
-        IM[Infrastructure Metrics]
-        PROF[AlwaysOn Profiling]
-        RUM_S[RUM]
-        SYN[Synthetics]
-        LOG[Log Observer]
-        DET[Detectors / Alerts]
-        COLL -->|traces| APM
-        COLL -->|metrics| IM
-        COLL -->|profiling logs via splunk_hec| PROF
+    subgraph Agent["Autonomous O11y Agent"]
+        COORD["Coordinator"]
+        SPECS["10 Specialists\n─────────────────\n⚡ Performance\n❤️  Health\n🔬 Instrumentation\n⚖️  Governance\n🚨 Detector\n📋 Logs\n🌐 RUM\n🔍 RCA\n🤖 Synthetics\n🗄️  DB / Dependency"]
+        REM["Remediation Engine"]
+        STATE["State Store"]
+        COORD --> SPECS --> REM --> STATE
     end
 
-    subgraph Agent["🤖 Autonomous O11y Agent"]
-        COORD[Coordinator\norchestrates parallel runs]
-        subgraph Specialists["10 Specialist Agents  (Claude via Bedrock / OpenAI)"]
-            S1[⚡ Performance\nprofiling · N+1 · code fix]
-            S2[❤️ Health\nerrors · latency · collector]
-            S3[🔬 Instrumentation\nspan quality · attribute coverage]
-            S4[⚖️ Governance\ncardinality · MTS growth]
-            S5[🚨 Detector\ndark services · provisioning]
-            S6[📋 Logs\nerror patterns · volume]
-            S7[🌐 RUM\nJS errors · Core Web Vitals]
-            S8[🔍 RCA\nincident · causal chain]
-            S9[🤖 Synthetics\ncoverage · failures]
-            S10[🗄️ DB/Dependency\ntopology · db.* attrs]
-        end
-        REM[Remediation Engine\nrule-based action mapping]
-        SYNTH[Synthesis\ncross-domain narrative]
-        STATE[State Store\nrun history · trend context]
-        COORD --> Specialists
-        Specialists --> REM
-        Specialists --> SYNTH
-        REM --> STATE
-        SYNTH --> STATE
+    subgraph UI["Supervisor UI"]
+        DASH["Assessment Dashboard"]
+        ACTIONS["ActionEngine\ncreate_detector · restart_service\nadd_db_instrumentation · code_fix"]
     end
 
-    subgraph UI["🖥️ Supervisor UI"]
-        DASH[Assessment Dashboard\npriority issues · scorecards]
-        REMUI[Pending Remediations\nApply / Preview buttons]
-        CHAT[Chat Interface\nnatural-language queries]
-        STATE -->|GET /api/assessment/latest| DASH
-        STATE --> REMUI
-        STATE --> CHAT
-    end
-
-    subgraph Actions["⚙️ ActionEngine"]
-        A1[create_splunk_detector]
-        A2[build_detectors]
-        A3[add_db_instrumentation]
-        A4[reload_collector]
-        A5[restart_service]
-        A6[generate_code_fix]
-        A7[rebaseline_detectors]
-    end
-
-    APM -->|API queries| S2 & S3 & S8 & S10 & S1
-    IM -->|SignalFlow| S3 & S4
-    PROF -->|flame graphs| S1
-    RUM_S -->|session data| S7
-    SYN -->|test results| S9
-    LOG -->|error logs| S6
-    DET -->|alert history| S5
-
-    REMUI -->|approve & apply| Actions
-    Actions -->|update| Splunk
-    Actions -->|redeploy| Sources
+    COLL -->|traces · metrics\nprofiling logs| Splunk
+    Splunk -->|API queries| COORD
+    STATE -->|findings + remediations| DASH
+    DASH -->|approve & apply| ACTIONS
+    ACTIONS -->|updates| Splunk
 ```
 
 ## Quick start
