@@ -59,19 +59,29 @@ def _signalflow(program: str, hours: int = 1) -> dict:
     results: dict[str, list] = {}
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            for line in resp:
-                line = line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("type") == "data":
-                    for ts_str, payload_data in msg.get("data", {}).items():
-                        for stream_id, val in payload_data.items():
-                            if val is not None:
-                                results.setdefault(stream_id, []).append(val)
+            current_event_type = None
+            data_lines: list[str] = []
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                if line.startswith("event: "):
+                    current_event_type = line[7:].strip()
+                    data_lines = []
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+                elif line == "" and data_lines:
+                    try:
+                        msg = json.loads("\n".join(data_lines))
+                    except json.JSONDecodeError:
+                        data_lines = []
+                        continue
+                    etype = current_event_type or msg.get("type", "")
+                    if etype == "data":
+                        for point in msg.get("data", []):
+                            tsid = point.get("tsId", "")
+                            val = point.get("value")
+                            if tsid and val is not None:
+                                results.setdefault(tsid, []).append(float(val))
+                    data_lines = []
     except Exception as exc:
         logger.warning("SignalFlow query failed: %s", exc)
     return results

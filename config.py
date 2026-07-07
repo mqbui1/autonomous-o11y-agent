@@ -96,6 +96,23 @@ class AgentConfig:
         ]
     )
 
+    # ── Source code access (for performance specialist) ───────────────────────
+    # Set SOURCE_ROOT to a mounted directory containing service source repos.
+    # Set GITHUB_TOKEN + GITHUB_REPO for GitHub API access.
+    # Neither set → profiling-only mode (file:line recommendations, no diffs).
+    source_root: str = field(
+        default_factory=lambda: os.environ.get("SOURCE_ROOT", "")
+    )
+    github_token: str = field(
+        default_factory=lambda: os.environ.get("GITHUB_TOKEN", "")
+    )
+    github_repo: str = field(
+        default_factory=lambda: os.environ.get("GITHUB_REPO", "")
+    )
+    github_branch: str = field(
+        default_factory=lambda: os.environ.get("GITHUB_BRANCH", "main")
+    )
+
     # ── Synthesis / assessment timeouts ───────────────────────────────────────
     synthesis_timeout: int = field(
         default_factory=lambda: int(os.environ.get("SYNTHESIS_TIMEOUT", "900"))

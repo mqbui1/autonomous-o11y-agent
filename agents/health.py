@@ -40,7 +40,7 @@ In metrics, include: detectors_healthy, detectors_critical, silent_service_count
 
 def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     collector: dict = {}
-    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s["name"] == "get_token_health"] + [SUBMIT_SCHEMA]
+    all_schemas = SCHEMAS + [s for s in ADOPTION_SCHEMAS if s.get("toolSpec", {}).get("name") == "get_token_health"] + [SUBMIT_SCHEMA]
     all_tool_fns = {
         **TOOL_FNS,
         "get_token_health": ADOPTION_FNS["get_token_health"],

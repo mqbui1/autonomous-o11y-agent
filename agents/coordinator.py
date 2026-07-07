@@ -37,6 +37,7 @@ import agents.rum as rum_agent
 import agents.rca as rca_agent
 import agents.synthetics as synthetics_agent
 import agents.db as db_agent
+import agents.performance as performance_agent
 from agents.remediation import generate_remediations
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ def run_assessment(
         "rca": rca_agent,
         "synthetics": synthetics_agent,
         "db": db_agent,
+        "performance": performance_agent,
     }
 
     logger.info(
@@ -109,8 +111,13 @@ def run_assessment(
     import time as _time
     _run_start = _time.time()
 
+    try:
+        from receiver.otlp_receiver import update_assessment_progress as _update_progress
+    except ImportError:
+        _update_progress = None
+
     findings: dict[str, SpecialistFindings] = {}
-    with ThreadPoolExecutor(max_workers=9) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
             pool.submit(mod.run, config, state_context): name
             for name, mod in specialists.items()
@@ -134,6 +141,8 @@ def run_assessment(
                     raw_text=str(exc),
                 )
                 logger.error("Specialist '%s' failed: %s", name, exc, exc_info=True)
+            if _update_progress:
+                _update_progress("specialists", len(findings), name=name)
 
     # Deduplicate issues across specialists before synthesis/save
     _dedup_cross_specialist_issues(findings)
@@ -143,6 +152,9 @@ def run_assessment(
     if cross_domain:
         logger.info("Cross-domain issues detected — injecting into synthesis")
 
+    if _update_progress:
+        _update_progress("synthesizing")
+
     if _is_convergent_blackout(findings):
         logger.info(
             "Convergent blackout detected (all specialists report zero telemetry) — "
@@ -151,6 +163,9 @@ def run_assessment(
         synthesis = _fast_blackout_synthesis(config, findings, cross_domain)
     else:
         synthesis = _synthesize(config, findings, cross_domain, prompt)
+
+    if _update_progress:
+        _update_progress("saving")
 
     # Persist rich structured state
     import uuid as _uuid

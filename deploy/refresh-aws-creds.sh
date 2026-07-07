@@ -1,27 +1,41 @@
 #!/bin/bash
-# Refresh AWS Bedrock session credentials in .env (tokens expire ~1h).
-# Run this when the agent starts failing LLM calls with auth errors.
+# Refresh AWS credentials from dev-login and write to ~/.aws/credentials.
+# Containers mount ~/.aws/credentials as a read-only bind mount, so they
+# pick up the new token immediately — no container restart needed.
 #
-# Usage: ./refresh-aws-creds.sh
+# Usage:
+#   ./deploy/refresh-aws-creds.sh
+#
+# To auto-refresh hourly via crontab:
+#   0 * * * * /path/to/autonomous-o11y-agent/deploy/refresh-aws-creds.sh >> /tmp/aws-refresh.log 2>&1
 
 set -e
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
 
-echo "Fetching fresh AWS credentials..."
-eval $(aws configure export-credentials --format env)
+PROFILE="387769110234_bedrock-inference-role"
+CREDS_FILE="$HOME/.aws/credentials"
 
-if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-  echo "ERROR: Failed to get credentials. Is your Okta session active?"
-  exit 1
-fi
+echo "Fetching credentials for profile: $PROFILE ..."
+RAW=$(dev-login aws credential-process --profile "$PROFILE")
 
-# Update .env in-place
-sed -i '' "s|^AWS_ACCESS_KEY_ID=.*|AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID|" "$ENV_FILE"
-sed -i '' "s|^AWS_SECRET_ACCESS_KEY=.*|AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY|" "$ENV_FILE"
-sed -i '' "s|^AWS_SESSION_TOKEN=.*|AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN|" "$ENV_FILE"
+KEY=$(echo "$RAW"    | python3 -c "import sys,json; print(json.load(sys.stdin)['AccessKeyId'])")
+SECRET=$(echo "$RAW" | python3 -c "import sys,json; print(json.load(sys.stdin)['SecretAccessKey'])")
+TOKEN=$(echo "$RAW"  | python3 -c "import sys,json; print(json.load(sys.stdin)['SessionToken'])")
+EXPIRY=$(echo "$RAW" | python3 -c "import sys,json; print(json.load(sys.stdin)['Expiration'])")
 
-echo "Updated .env with fresh credentials (key: ${AWS_ACCESS_KEY_ID:0:12}...)"
-echo ""
-echo "Recreating containers to pick up new creds..."
-docker compose up -d o11y-agent supervisor
+# Write both [default] and the named profile so containers work with or without AWS_PROFILE set
+cat > "$CREDS_FILE" <<EOF
+[default]
+aws_access_key_id = $KEY
+aws_secret_access_key = $SECRET
+aws_session_token = $TOKEN
+
+[$PROFILE]
+aws_access_key_id = $KEY
+aws_secret_access_key = $SECRET
+aws_session_token = $TOKEN
+EOF
+
+chmod 600 "$CREDS_FILE"
+echo "Credentials written to $CREDS_FILE"
+echo "Valid until: $EXPIRY"
+echo "Containers using the bind mount will use the new token on their next AWS call."

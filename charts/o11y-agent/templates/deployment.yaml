@@ -109,6 +109,36 @@ spec:
               value: {{ .Values.toolPaths.healthCheck | quote }}
             {{- end }}
 
+            # ── Application namespace (for kubectl remediation commands) ────────
+            - name: OTEL_NAMESPACE
+              value: {{ .Values.appNamespace | default .Release.Namespace | quote }}
+
+            # ── Performance specialist: source code access ───────────────────────
+            {{- if .Values.performance.gitSync.enabled }}
+            - name: SOURCE_ROOT
+              value: {{ .Values.performance.mountPath | default "/src" | quote }}
+            {{- else if .Values.performance.existingClaimName }}
+            - name: SOURCE_ROOT
+              value: {{ .Values.performance.mountPath | default "/src" | quote }}
+            {{- end }}
+            {{- if or .Values.performance.github.token .Values.performance.github.existingSecret }}
+            - name: GITHUB_TOKEN
+              {{- if .Values.performance.github.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.performance.github.existingSecret }}
+                  key: GITHUB_TOKEN
+              {{- else }}
+              value: {{ .Values.performance.github.token | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if .Values.performance.github.repo }}
+            - name: GITHUB_REPO
+              value: {{ .Values.performance.github.repo | quote }}
+            - name: GITHUB_BRANCH
+              value: {{ .Values.performance.github.branch | default "main" | quote }}
+            {{- end }}
+
           livenessProbe:
             httpGet:
               path: /healthz
@@ -129,6 +159,42 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /home/agent/.o11y-agent
+            {{- if or .Values.performance.gitSync.enabled .Values.performance.existingClaimName }}
+            - name: source
+              mountPath: {{ .Values.performance.mountPath | default "/src" }}
+              readOnly: true
+            {{- end }}
+
+      {{- if .Values.performance.gitSync.enabled }}
+      # git-sync sidecar: keeps SOURCE_ROOT in sync with the configured git repo.
+      # Runs as an init container first (initial clone), then as a sidecar (continuous sync).
+      initContainers:
+        - name: git-sync-init
+          image: registry.k8s.io/git-sync/git-sync:v4.2.1
+          args:
+            - --repo={{ .Values.performance.gitSync.repo }}
+            - --ref={{ .Values.performance.gitSync.branch | default "main" }}
+            - --depth={{ .Values.performance.gitSync.depth | default 1 }}
+            - --root={{ .Values.performance.mountPath | default "/src" }}
+            - --one-time
+          volumeMounts:
+            - name: source
+              mountPath: {{ .Values.performance.mountPath | default "/src" }}
+          {{- if .Values.performance.gitSync.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.performance.gitSync.existingSecret }}
+          {{- end }}
+          securityContext:
+            runAsUser: 65533
+            runAsNonRoot: true
+      {{- end }}
+
+      {{- if .Values.performance.gitSync.enabled }}
+      # Sidecar for continuous sync after init
+      # Note: defined as additional container alongside the main o11y-agent container
+      # Using a separate containers entry appended after the main container list.
+      {{- end }}
 
       volumes:
         - name: state
@@ -138,4 +204,13 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.performance.gitSync.enabled }}
+        - name: source
+          emptyDir: {}
+        {{- else if .Values.performance.existingClaimName }}
+        - name: source
+          persistentVolumeClaim:
+            claimName: {{ .Values.performance.existingClaimName }}
+            readOnly: true
+        {{- end }}
 {{- end }}

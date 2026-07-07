@@ -84,6 +84,43 @@ toolPaths:
   analyzer: ""
   healthCheck: ""
 
+# ── Application namespace ─────────────────────────────────────────────────────
+# Namespace where your application workloads run.
+# Used for: kubectl rollout restart, OTel Instrumentation CRs, collector ConfigMap patches.
+# Defaults to the Helm release namespace if empty.
+appNamespace: ""
+
+# ── Performance specialist ─────────────────────────────────────────────────────
+performance:
+  # Source code access enables the performance specialist to generate concrete code diffs.
+  # Without source access, it still detects N+1 queries and hotspots from profiling + spans.
+
+  # Option A: git-sync sidecar — keeps a git repo checked out at /src inside the pod.
+  # Recommended for production: source is always current, no GitHub token needed at runtime.
+  gitSync:
+    enabled: false
+    repo: ""           # Git repo URL e.g. https://github.com/myorg/myapp.git
+    branch: "main"
+    depth: 1           # Shallow clone (faster)
+    period: "5m"       # How often to re-sync
+    # Git credentials secret — must have keys GIT_SYNC_USERNAME and GIT_SYNC_PASSWORD
+    # Create with: kubectl create secret generic git-sync-creds \
+    #   --from-literal=GIT_SYNC_USERNAME=x-token \
+    #   --from-literal=GIT_SYNC_PASSWORD=ghp_...
+    existingSecret: ""
+
+  # Option B: GitHub API — fetches file contents on demand (no volume mount needed).
+  # Good for read-only access to a single repo; slightly slower per read.
+  github:
+    token: ""          # GitHub personal access token (read:repo scope)
+    existingSecret: "" # Name of existing Secret with key GITHUB_TOKEN
+    repo: ""           # org/repo e.g. "myorg/myapp"
+    branch: "main"
+
+  # Option C: pre-mounted PVC with source code (for air-gapped / self-hosted git).
+  existingClaimName: ""
+  mountPath: "/src"
+
 # ── Gateway collector patch ───────────────────────────────────────────────────
 # When enabled, renders a ConfigMap with the values to merge into your
 # splunk-otel-collector gateway deployment so it fans out to this agent.
