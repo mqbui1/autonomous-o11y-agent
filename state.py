@@ -61,7 +61,7 @@ class EnvironmentState:
         ]
 
         if last.instrumentation_score is not None:
-            lines.append(f"- Instrumentation score: {last.instrumentation_score}/100")
+            lines.append(f"- Instrumentation score: {last.instrumentation_score}/100 (formula: avg of APM/metrics/logs signal scores)")
         lines.append(
             f"- Active services: {last.services_active}, Silent: {last.services_silent}"
         )

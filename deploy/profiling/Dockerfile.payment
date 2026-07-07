@@ -1,0 +1,14 @@
+# Payment — Node.js v22 with Splunk OTel distro for AlwaysOn Profiling
+
+# ── Stage 1: install @splunk/otel ────────────────────────────────────────────
+FROM node:22-alpine AS builder
+WORKDIR /install
+RUN npm install @splunk/otel
+
+# ── Stage 2: final image ──────────────────────────────────────────────────────
+FROM ghcr.io/open-telemetry/demo:latest-payment
+
+COPY --from=builder /install/node_modules /usr/src/app/node_modules
+
+# Payment has no pre-existing --require flag, so prepend @splunk/otel/instrument.
+CMD ["--require=@splunk/otel/instrument", "index.js"]
