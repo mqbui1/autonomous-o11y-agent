@@ -140,6 +140,10 @@ DO NOT create issues for:
 - Error rates, service failures, or dependency outages — those are health/RCA domain
 - Missing detectors or alerting gaps — that is the detector specialist's domain
 - Findings where you have no latency or profiling data, only error counts
+- Silent services or stub telemetry (service_requests_total=1, zero spans) — that is
+  the instrumentation specialist's domain. If a service has no spans to analyze, skip it.
+- OTel Collector config, service.name mismatches, SDK initialization — those are
+  instrumentation/health domain. Never recommend kubectl commands or env var audits.
 """
 
 
