@@ -41,12 +41,20 @@ TIER A (best): AlwaysOn Profiling + Source Code
 - Generate a concrete diff or annotated fix showing exactly what to change
 - Reference the specific line: "at src/cart/repository.py:247 in get_cart_items()"
 
-TIER B+: Call Graph API (trace-correlated profiling, no source)
+TIER B+: Call Graph API / Snapshot Profiling (trace-correlated, requires Snapshot Profiling enabled)
+- Available for: Java (OTel Java v2.15.0+), Node.js (OTel JS v3.2.0+),
+  Python (OTel Python v2.10.0+), .NET (OTel .NET v1.3.0+)
+- Requires SPLUNK_SNAPSHOT_PROFILER_ENABLED=true on the service
+  (.NET uses SPLUNK_PROFILER_ENABLED=true instead — different var!)
+  NOTE: this is DIFFERENT from SPLUNK_PROFILER_ENABLED (AlwaysOn Profiling / flamegraphs)
 - Use get_slowest_methods(service, trace_id, from_ms, to_ms) with a trace ID from a slow span
 - Returns class + method ranked by exclusive self-time for THAT specific request
+- Only ~1% of traces are sampled by default — look for splunk.snapshot.profiling=true on span
 - More precise than aggregate flamegraph: pinpoints the exact hot code path
 - Describe the fix: "className.methodName consumed Xms self-time — likely due to..."
 - Include method + class in action_args
+- If profiling_available=False with a 404: SPLUNK_SNAPSHOT_PROFILER_ENABLED is not set,
+  SDK version is too old, or org doesn't have AlwaysOn Profiling license — use Tier B/C
 
 TIER B: AlwaysOn Profiling only (no source)
 - Use get_cpu_flamegraph for file:line:function

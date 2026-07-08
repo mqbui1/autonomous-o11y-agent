@@ -572,15 +572,32 @@ def get_slowest_methods(
     limit: int = 5,
 ) -> str:
     """
-    Get the slowest methods for a specific trace using the Splunk Call Graph API.
+    Get the slowest methods for a specific trace using the Splunk Call Graph (Snapshot Profiling) API.
 
     Returns the top methods ranked by exclusive self-time (CPU time spent inside
     the method itself, excluding callees). This is trace-correlated profiling:
-    you get the exact functions that were hot during THIS specific slow request,
+    you get the exact class+method that were hot during THIS specific slow request,
     not a broad aggregate.
 
-    Use this after finding a slow trace via analyze_span_call_patterns or
-    search_error_traces to drill into which code was executing during that trace.
+    REQUIREMENTS — this API only works when ALL of the following are true:
+      1. Supported language + minimum SDK version:
+           Java:    Splunk OTel Java v2.15.0+   → SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+           Node.js: Splunk OTel JS v3.2.0+      → SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+           Python:  Splunk OTel Python v2.10.0+ → SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+           .NET:    Splunk OTel .NET v1.3.0+    → SPLUNK_PROFILER_ENABLED=true (different var!)
+         NOTE: SPLUNK_SNAPSHOT_PROFILER_ENABLED is different from SPLUNK_PROFILER_ENABLED.
+         SPLUNK_PROFILER_ENABLED enables AlwaysOn Profiling (aggregate flamegraphs);
+         SPLUNK_SNAPSHOT_PROFILER_ENABLED enables Snapshot/Call Graph Profiling (trace-correlated).
+      2. The org has an AlwaysOn Profiling license.
+      3. OTel Collector v0.44.0+ with profilingEnabled=true (Helm) or logs pipeline configured.
+      4. The specific trace was sampled (only ~1% by default —
+         look for splunk.snapshot.profiling=true on the span to confirm it was captured).
+         Increase coverage with: SPLUNK_SNAPSHOT_SELECTION_PROBABILITY=0.1
+
+    If these conditions are not met, the API returns 404. Fall back to get_cpu_flamegraph.
+
+    Use this after finding a slow trace via analyze_span_call_patterns to drill into
+    which code was executing during that specific request.
 
     Args:
         service:        Service name (must match the service in the trace).
@@ -629,9 +646,11 @@ def get_slowest_methods(
                 "reason": reason or "NO_SAMPLES",
                 "metadata": metadata,
                 "note": (
-                    "No profiling samples found for this trace. "
-                    "AlwaysOn Profiling must be enabled for this service and the trace "
-                    "must fall within the profiling retention window. "
+                    "No snapshot profiling samples found for this trace. "
+                    "Snapshot Profiling (SPLUNK_SNAPSHOT_PROFILER_ENABLED=true) must be "
+                    "enabled on a Java service using OTel Java agent v2.15.0+, and only "
+                    "~1% of traces are captured by default (splunk.snapshot.selection.probability=0.01). "
+                    "Check that the span has splunk.snapshot.profiling=true attribute. "
                     "Fall back to get_cpu_flamegraph for aggregate data."
                 ),
             }, indent=2)
@@ -680,9 +699,23 @@ def get_slowest_methods(
             "profiling_available": False,
             "error": err,
             "api_feedback": (
-                "If this is a 404, the call-graph API may not be enabled for this org/realm. "
-                "If 400, check that service and trace_id are non-empty and the time window "
-                "is ≤ 24h. If 403, the token may be missing the required Splunk profiling scope."
+                "Call Graph (Snapshot Profiling) API requirements: "
+                "(1) Supported language + SDK: Java (OTel Java v2.15.0+), Node.js (OTel JS v3.2.0+), "
+                "Python (OTel Python v2.10.0+), .NET (OTel .NET v1.3.0+). "
+                "(2) Env var to enable: SPLUNK_SNAPSHOT_PROFILER_ENABLED=true for Java/Node.js/Python; "
+                "SPLUNK_PROFILER_ENABLED=true for .NET. "
+                "NOTE: SPLUNK_PROFILER_ENABLED (AlwaysOn Profiling) is DIFFERENT from "
+                "SPLUNK_SNAPSHOT_PROFILER_ENABLED (Snapshot/Call Graph Profiling). "
+                "(3) AlwaysOn Profiling license on the org. "
+                "(4) OTel Collector v0.44.0+ with profilingEnabled=true (Helm) or logs pipeline. "
+                "(5) Only ~1% of traces are sampled by default — look for "
+                "splunk.snapshot.profiling=true on the span attribute to confirm. "
+                "A 404 means the API is not enabled for this org/realm, the service SDK is too old, "
+                "or SPLUNK_SNAPSHOT_PROFILER_ENABLED is not set. "
+                "A 403 means the token is missing profiling scope. "
+                "To increase coverage: SPLUNK_SNAPSHOT_SELECTION_PROBABILITY=0.1 "
+                "and SPLUNK_SNAPSHOT_PROFILER_SAMPLING_INTERVAL=1ms (Java/Python) "
+                "or SPLUNK_SNAPSHOT_PROFILER_SAMPLING_INTERVAL=1ms (Node.js)."
             ),
             "note": "Fall back to get_cpu_flamegraph for aggregate profiling data.",
         }, indent=2)
