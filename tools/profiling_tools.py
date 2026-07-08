@@ -58,19 +58,16 @@ def _api(path: str, payload: dict = None, method: str = "GET",
 
 
 def _get_org_id() -> str | None:
-    """Fetch and cache the Splunk org ID via /v2/organizations/member."""
+    """Fetch and cache the Splunk org ID via /v2/organization."""
     global _org_id_cache
     if _org_id_cache:
         return _org_id_cache
     try:
-        data = _api("/v2/organizations/member")
-        # Response is a list of org memberships; use the first org's id
-        orgs = data if isinstance(data, list) else data.get("organizations", [data])
-        for org in orgs:
-            oid = org.get("id") or org.get("organizationId")
-            if oid:
-                _org_id_cache = str(oid)
-                return _org_id_cache
+        data = _api("/v2/organization")
+        oid = data.get("id") or data.get("organizationId")
+        if oid:
+            _org_id_cache = str(oid)
+            return _org_id_cache
     except Exception as exc:
         logger.debug("Could not fetch org ID: %s", exc)
     return None
