@@ -304,6 +304,9 @@ services:
       - SPLUNK_PROFILER_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
       - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
+      # Snapshot / Call Graph Profiling — trace-correlated stack captures.
+      - SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+      - SPLUNK_SNAPSHOT_SELECTION_PROBABILITY=0.1
     depends_on:
       otel-collector:
         condition: service_started
@@ -465,6 +468,9 @@ services:
       - SPLUNK_PROFILER_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
       - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
+      # Snapshot / Call Graph Profiling — trace-correlated stack captures.
+      - SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+      - SPLUNK_SNAPSHOT_SELECTION_PROBABILITY=0.1
     depends_on:
       otel-collector:
         condition: service_started
@@ -538,6 +544,11 @@ services:
       # uses the gRPC exporter protocol — gRPC on port 4318 (HTTP) would fail.
       # Without this var, profiling logs use the main gRPC endpoint (4317) instead.
       - SPLUNK_PROFILER_ENABLED=true
+      # Snapshot / Call Graph Profiling — trace-correlated stack captures.
+      # Different from SPLUNK_PROFILER_ENABLED (AlwaysOn aggregate flamegraphs).
+      # Selection probability bumped to 10% (default 1%) for testing.
+      - SPLUNK_SNAPSHOT_PROFILER_ENABLED=true
+      - SPLUNK_SNAPSHOT_SELECTION_PROBABILITY=0.1
     depends_on:
       otel-collector:
         condition: service_started
