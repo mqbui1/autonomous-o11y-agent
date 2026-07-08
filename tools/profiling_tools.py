@@ -34,12 +34,19 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 _PROFILING_API = "/v2/apm/profiling"
+_CALLGRAPH_API = "/v2/call-graphs"
+
+# Lazily resolved org ID (required by the call-graph API as X-SF-OrgId).
+_org_id_cache: str | None = None
 
 
-def _api(path: str, payload: dict = None, method: str = "GET") -> dict:
+def _api(path: str, payload: dict = None, method: str = "GET",
+         extra_headers: dict | None = None) -> dict:
     cfg = get_config()
     url = f"https://api.{cfg.realm}.signalfx.com{path}"
     headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     data = json.dumps(payload).encode() if payload else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
@@ -48,6 +55,25 @@ def _api(path: str, payload: dict = None, method: str = "GET") -> dict:
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:300]
         raise RuntimeError(f"API {method} {path} → {e.code}: {body}") from e
+
+
+def _get_org_id() -> str | None:
+    """Fetch and cache the Splunk org ID via /v2/organizations/member."""
+    global _org_id_cache
+    if _org_id_cache:
+        return _org_id_cache
+    try:
+        data = _api("/v2/organizations/member")
+        # Response is a list of org memberships; use the first org's id
+        orgs = data if isinstance(data, list) else data.get("organizations", [data])
+        for org in orgs:
+            oid = org.get("id") or org.get("organizationId")
+            if oid:
+                _org_id_cache = str(oid)
+                return _org_id_cache
+    except Exception as exc:
+        logger.debug("Could not fetch org ID: %s", exc)
+    return None
 
 
 def _signalflow(program: str, start_ms: int, end_ms: int) -> dict:
@@ -541,6 +567,137 @@ def get_thread_profile(service: str, environment: str, lookback_minutes: int = 3
         }, indent=2)
 
 
+def get_slowest_methods(
+    service: str,
+    trace_id: str,
+    from_epoch_ms: int,
+    to_epoch_ms: int,
+    limit: int = 5,
+) -> str:
+    """
+    Get the slowest methods for a specific trace using the Splunk Call Graph API.
+
+    Returns the top methods ranked by exclusive self-time (CPU time spent inside
+    the method itself, excluding callees). This is trace-correlated profiling:
+    you get the exact functions that were hot during THIS specific slow request,
+    not a broad aggregate.
+
+    Use this after finding a slow trace via analyze_span_call_patterns or
+    search_error_traces to drill into which code was executing during that trace.
+
+    Args:
+        service:        Service name (must match the service in the trace).
+        trace_id:       Trace ID from a slow APM span.
+        from_epoch_ms:  Start of the time window (epoch milliseconds).
+        to_epoch_ms:    End of the time window (epoch milliseconds).
+        limit:          Max methods to return (default 5, max 5).
+    """
+    # Validate window: must be ≤ 24h
+    window_ms = to_epoch_ms - from_epoch_ms
+    if window_ms <= 0 or window_ms > 86_400_000:
+        return json.dumps({
+            "error": "Time window must be between 0 and 24 hours.",
+            "from_epoch_ms": from_epoch_ms,
+            "to_epoch_ms": to_epoch_ms,
+        }, indent=2)
+
+    limit = min(limit, 5)
+
+    org_id = _get_org_id()
+    if not org_id:
+        return json.dumps({
+            "profiling_available": False,
+            "error": "Could not resolve Splunk org ID (X-SF-OrgId). "
+                     "Set SPLUNK_ORG_ID env var or ensure the token has org-read scope.",
+            "note": "Fall back to get_cpu_flamegraph for aggregate profiling data.",
+        }, indent=2)
+
+    try:
+        path = (
+            f"{_CALLGRAPH_API}/{urllib.request.quote(service, safe='')}"
+            f"/{urllib.request.quote(trace_id, safe='')}"
+            f"/slow-methods?from={from_epoch_ms}&to={to_epoch_ms}&limit={limit}"
+        )
+        data = _api(path, extra_headers={"X-SF-OrgId": org_id})
+
+        methods = data.get("methods", [])
+        metadata = data.get("metadata", {})
+        reason = metadata.get("reason", "")
+
+        if not methods or reason == "NO_SAMPLES":
+            return json.dumps({
+                "service": service,
+                "trace_id": trace_id,
+                "profiling_available": False,
+                "reason": reason or "NO_SAMPLES",
+                "metadata": metadata,
+                "note": (
+                    "No profiling samples found for this trace. "
+                    "AlwaysOn Profiling must be enabled for this service and the trace "
+                    "must fall within the profiling retention window. "
+                    "Fall back to get_cpu_flamegraph for aggregate data."
+                ),
+            }, indent=2)
+
+        # Normalize output — surface the fields the LLM needs for code-level analysis
+        normalized = []
+        for m in methods:
+            normalized.append({
+                "method": m.get("methodName", ""),
+                "class": m.get("className", ""),
+                "self_time_ms": round(float(m.get("totalSelfTimeMs", 0)), 2),
+                "sample_count": m.get("sampleCount", 0),
+                "exit_call": m.get("exitCall"),         # what the method was waiting on
+                "exit_call_action": m.get("exitCallAction"),
+            })
+
+        total_self_ms = sum(m["self_time_ms"] for m in normalized)
+
+        return json.dumps({
+            "service": service,
+            "trace_id": trace_id,
+            "profiling_available": True,
+            "source": "splunk_callgraph_api",
+            "slowest_methods": normalized,
+            "total_self_time_ms": round(total_self_ms, 2),
+            "metadata": {
+                "window_from_ms": metadata.get("windowFrom"),
+                "window_to_ms": metadata.get("windowTo"),
+                "total_candidates": metadata.get("totalCandidates"),
+                "total_frames_scanned": metadata.get("totalFrames"),
+            },
+            "interpretation": (
+                "self_time_ms is exclusive CPU time (time spent inside the method itself, "
+                "not waiting on callees). High self_time = the method itself is the bottleneck. "
+                "exit_call shows what the method was blocked on (I/O, locks, etc.) when it "
+                "yielded — null means it was actively computing."
+            ),
+        }, indent=2)
+
+    except RuntimeError as exc:
+        err = str(exc)
+        # Surface alpha/beta API issues with context so we can give feedback
+        return json.dumps({
+            "service": service,
+            "trace_id": trace_id,
+            "profiling_available": False,
+            "error": err,
+            "api_feedback": (
+                "If this is a 404, the call-graph API may not be enabled for this org/realm. "
+                "If 400, check that service and trace_id are non-empty and the time window "
+                "is ≤ 24h. If 403, the token may be missing the required Splunk profiling scope."
+            ),
+            "note": "Fall back to get_cpu_flamegraph for aggregate profiling data.",
+        }, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "service": service,
+            "trace_id": trace_id,
+            "profiling_available": False,
+            "error": str(exc),
+        }, indent=2)
+
+
 # ── Tool registry ──────────────────────────────────────────────────────────────
 
 SCHEMAS = [
@@ -609,6 +766,31 @@ SCHEMAS = [
     },
     {
         "toolSpec": {
+            "name": "get_slowest_methods",
+            "description": (
+                "Get the slowest methods for a specific trace using the Splunk Call Graph API. "
+                "Returns top methods ranked by exclusive self-time (CPU time inside the method "
+                "itself, not callees). This is trace-correlated: you get the exact hot functions "
+                "for THIS slow request. "
+                "Use after finding a slow trace in analyze_span_call_patterns or search_error_traces. "
+                "Returns class name + method name — combine with get_source_context for Tier A analysis. "
+                "Falls back gracefully if the API is unavailable (alpha/beta)."
+            ),
+            "inputSchema": {"json": {
+                "type": "object",
+                "required": ["service", "trace_id", "from_epoch_ms", "to_epoch_ms"],
+                "properties": {
+                    "service":        {"type": "string", "description": "Service name from APM"},
+                    "trace_id":       {"type": "string", "description": "Trace ID from a slow span"},
+                    "from_epoch_ms":  {"type": "integer", "description": "Window start (epoch ms)"},
+                    "to_epoch_ms":    {"type": "integer", "description": "Window end (epoch ms)"},
+                    "limit":          {"type": "integer", "description": "Max methods (default 5, max 5)"},
+                },
+            }},
+        }
+    },
+    {
+        "toolSpec": {
             "name": "get_thread_profile",
             "description": (
                 "Get thread state distribution — identifies lock contention and blocking I/O. "
@@ -630,5 +812,6 @@ TOOL_FNS = {
     "get_cpu_flamegraph": get_cpu_flamegraph,
     "get_memory_profile": get_memory_profile,
     "analyze_span_call_patterns": analyze_span_call_patterns,
+    "get_slowest_methods": get_slowest_methods,
     "get_thread_profile": get_thread_profile,
 }
