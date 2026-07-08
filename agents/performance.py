@@ -41,6 +41,13 @@ TIER A (best): AlwaysOn Profiling + Source Code
 - Generate a concrete diff or annotated fix showing exactly what to change
 - Reference the specific line: "at src/cart/repository.py:247 in get_cart_items()"
 
+TIER B+: Call Graph API (trace-correlated profiling, no source)
+- Use get_slowest_methods(service, trace_id, from_ms, to_ms) with a trace ID from a slow span
+- Returns class + method ranked by exclusive self-time for THAT specific request
+- More precise than aggregate flamegraph: pinpoints the exact hot code path
+- Describe the fix: "className.methodName consumed Xms self-time — likely due to..."
+- Include method + class in action_args
+
 TIER B: AlwaysOn Profiling only (no source)
 - Use get_cpu_flamegraph for file:line:function
 - Describe the fix pattern precisely: "replace per-item query at line 247 with
@@ -106,7 +113,26 @@ STEP 3 — Span pattern analysis (ALWAYS run this for all active services):
   rather than latency or call-count anti-patterns. Error rates are the health
   specialist's domain.
 
-STEP 4 — CPU profiling (if available):
+STEP 4 — Trace-correlated profiling via Call Graph API (preferred when trace IDs available):
+  For each slow trace found in Step 3 (latency outliers, high-error operations),
+  call get_slowest_methods(service, trace_id, from_epoch_ms, to_epoch_ms).
+
+  Use the span's timestamp ± 30 seconds as the time window:
+    from_epoch_ms = span_timestamp_ms - 30_000
+    to_epoch_ms   = span_timestamp_ms + 30_000
+
+  If get_slowest_methods returns profiling_available=True:
+  - Use class+method as the primary finding anchor (Tier B+)
+  - self_time_ms is exclusive CPU time — the method IS the bottleneck
+  - exit_call/exit_call_action reveals what it was blocked on (I/O, locks, sleep)
+  - Combine with span anti-pattern from Step 3 for a Tier B+/A finding
+  - Proceed to Step 5 to fetch source for these methods (Tier A)
+
+  If get_slowest_methods returns profiling_available=False:
+  - Note the error/reason in your reasoning (useful API feedback)
+  - Fall through to Step 4b
+
+STEP 4b — Aggregate CPU profiling (fallback when no trace IDs or call graph unavailable):
   Call get_cpu_flamegraph(service, environment) for EVERY service that has
   profiling enabled (from Step 2), regardless of whether Step 3 found span-level
   anti-patterns. Profiling can surface hot functions that span metrics alone
