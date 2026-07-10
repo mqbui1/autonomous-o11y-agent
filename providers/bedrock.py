@@ -37,7 +37,9 @@ class BedrockProvider(LLMProvider):
         self.region = region
 
     def _new_client(self):
-        return boto3.client(
+        # Fresh Session per call forces re-reading ~/.aws/credentials,
+        # avoiding boto3.DEFAULT_SESSION caching stale expired tokens.
+        return boto3.Session().client(
             "bedrock-runtime", region_name=self.region, config=_BEDROCK_CONFIG
         )
 

@@ -13,6 +13,16 @@ RUN /venv/bin/pip install --no-cache-dir "splunk-opentelemetry[all]"
 # Bootstrap installs any missing auto-instrumentation libraries
 RUN /venv/bin/splunk-py-trace-bootstrap || true
 
-# Tell opentelemetry-instrument to use the Splunk configurator,
-# which activates AlwaysOn Profiling when SPLUNK_PROFILER_ENABLED=true.
-ENV OTEL_PYTHON_CONFIGURATOR=splunk_configurator
+# Both opentelemetry-distro and splunk-opentelemetry register entry points
+# with name "configurator". _load_configurators() only runs the FIRST match,
+# which is opentelemetry.distro:OpenTelemetryConfigurator (comes first alphabetically).
+# Rename OpenTelemetryConfigurator's entry so SplunkConfigurator is the sole match.
+# The package remains installed (SplunkConfigurator imports it as its superclass).
+RUN find /venv/lib -name "entry_points.txt" -path "*/opentelemetry_distro-*.dist-info/*" | \
+    xargs sed -i \
+    's/^configurator = opentelemetry\.distro:OpenTelemetryConfigurator$/otel_configurator = opentelemetry.distro:OpenTelemetryConfigurator/'
+
+# Tell opentelemetry-instrument to use the Splunk configurator and distro.
+# Without OTEL_PYTHON_DISTRO, OpenTelemetryDistro (index 0) runs before SplunkDistro.
+ENV OTEL_PYTHON_CONFIGURATOR=configurator
+ENV OTEL_PYTHON_DISTRO=splunk_distro

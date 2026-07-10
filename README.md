@@ -153,6 +153,58 @@ The Supervisor UI surfaces these as a **Pending Remediations** panel with per-it
 | Detector threshold too tight / noisy | `rebaseline_detectors` | ✅ |
 | Performance hotspot with profiling data | `generate_code_fix` (file:line diff) | ⬜ |
 
+## Profiling Dashboard
+
+The profiling dashboard (`http://localhost:4319/profiling`) provides real-time CPU profiling, call-graph analysis, and AI-generated code fixes — all running inside the agent without any external API calls.
+
+### Instrumented services
+
+Three services from the Astronomy Shop demo are fully instrumented with Splunk OTel profiling:
+
+**Frontend — Node.js / TypeScript (Next.js 15)**
+Frontend is a compiled service — TypeScript gets bundled by webpack into minified JavaScript. Without extra work, profiling would only show cryptic bundle paths like `/.next/server/chunks/abc123.js` — useless for debugging. Solved by building the container with source maps enabled and setting `NODE_OPTIONS=--enable-source-maps` so the V8 profiler reports original TypeScript file paths at runtime. A VLQ/Source Map v3 decoder in the agent resolves any remaining compiled `.js` references back to their original `.ts` file and line number. The source viewer shows real TypeScript code — `pages/api/cart.ts`, `lib/cartUtils.ts` — with the exact hot line highlighted.
+
+**Payment — Node.js / TypeScript**
+A low-traffic service that only runs during checkout flows. AlwaysOn CPU profiling is typically idle (the 10-second sampler rarely catches it mid-request). Snapshot profiling is the relevant signal, capturing the actual call stack during a real payment transaction. Method Hotspots surfaces outbound gRPC calls and stream I/O ranked by contribution percentage across all captured traces.
+
+**Recommendation — Python**
+Python source is not compiled or minified — what the profiler sees is exactly what the developer wrote, no translation needed. The recommendation service uses scikit-learn and numpy for ML-based product recommendations, making it CPU-bound rather than I/O-bound. The AlwaysOn flamegraph is the most consistently populated of the three. Source viewer shows direct Python file paths with no source map resolution required.
+
+### What the agent detects
+
+The agent pattern-matches the actual source code around the hot line to classify the issue:
+
+| Issue type | Pattern detected | Severity |
+|---|---|---|
+| **Sync I/O in Hot Path** | `*Sync` calls (`readFileSync`, `execSync`) — blocks the event loop entirely | Amber |
+| **N+1 Async Pattern** | `.map(async` or `for...of` + `await` — one serial round trip per item instead of a parallel batch | Red |
+| **Serial Awaits (Parallelizable)** | Multiple `await` calls in sequence where neither depends on the other's result — can be rewritten with `Promise.all()` | Amber |
+| **Waterfall Calls (Data-Dependent)** | Serial `await` calls where the second uses data from the first — acknowledged but `Promise.all()` is not suggested as it would break the logic | Grey |
+| **Downstream Call** | Single `await` on an RPC/HTTP/gRPC call — flags it as the source of latency | Blue |
+| **Lock Contention** | Thread wait, acquire, semaphore patterns — common in Python services with GIL contention | Pink |
+
+### How AI fix generation works
+
+When triggered, the agent sends four things to the LLM:
+
+1. The service name and language
+2. The blocking function and `file:line` (from the profiling call stack)
+3. The app caller frame — the first line of user code above the blocking call
+4. 25 lines of actual source code surrounding the hot line, pulled live from the running container via Docker socket
+
+Because the LLM receives real source code in context — not just a function name — it returns a specific rewrite referencing the exact variable names, function signatures, and logic already in the file. The issue type classification also guides the fix: a `*Sync` → `fs.promises.*` rewrite, a `.map(async` → `Promise.all()` refactor, or a serial await → parallel await restructure.
+
+### Dashboard panels
+
+| Panel | What it shows |
+|---|---|
+| **AlwaysOn CPU Flamegraph** | 3-level icicle chart (category → package → function). Width = CPU share. 30-minute rolling window. |
+| **Top CPU Functions** | Top 10 functions by CPU%, with issue type badge and link to source viewer |
+| **Method Hotspots** | Aggregated view across all snapshot traces — contribution%, traces affected, worst trace, app caller frame. Mirrors Dynatrace's Method Hotspots panel. |
+| **Snapshot Trace Explorer** | Per-trace call stacks with source code viewer and AI Fix button |
+
+See [ROADMAP.md](ROADMAP.md) for planned enhancements including autonomous GitHub PR generation, P50/P99 split, and caller/callee breakdown.
+
 ## Supervisor UI integration
 
 The [Splunk OTel Supervisor](https://github.com/mqbui1/splunk-otel-supervisor) renders assessment findings in a web dashboard. After each run the agent exposes `GET /api/assessment/latest` and the supervisor proxies it to its **Agent** tab. The **Pending Remediations** panel lets operators apply fixes with or without human approval. See [deploy/docs/supervisor-integration.md](deploy/docs/supervisor-integration.md).

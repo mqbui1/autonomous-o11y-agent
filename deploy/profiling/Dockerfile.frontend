@@ -1,21 +1,52 @@
-# Frontend — Node.js v24 with Splunk OTel distro for AlwaysOn Profiling
+# Frontend — built from source with source maps + Splunk OTel profiling
 #
-# The base image is distroless (no npm). We install @splunk/otel in a builder
-# stage that matches the Node.js version, then copy only the package into the
-# final image's existing node_modules directory.
+# Source maps are enabled via next.config.js (config.devtool = 'source-map'
+# for server, 'hidden-source-map' for client). This causes the pprof CPU
+# profiler to report original TypeScript file paths in stack frames instead
+# of compiled webpack bundle paths, enabling the profiling UI to show and
+# fix real source code.
+#
+# Build context: opentelemetry-demo/ (repo root, one level up from deploy/)
 
-# ── Stage 1: install @splunk/otel ────────────────────────────────────────────
-FROM node:24-alpine AS builder
-WORKDIR /install
-RUN npm install @splunk/otel
+# ── Stage 1: build Next.js with source maps + install @splunk/otel together ───
+# Installing @splunk/otel in the same npm context as the frontend lets npm
+# resolve any OTel version conflicts (prevents semconvStabilityFromStr errors).
+FROM node:22-alpine AS next-builder
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY src/frontend/package*.json ./
+RUN npm clean-install --no-audit --no-progress
+# Install @splunk/otel alongside existing deps so versions resolve correctly
+RUN npm install --no-save @splunk/otel
+COPY src/frontend/protos ./protos
+COPY src/frontend .
+# Build — next.config.js sets devtool: 'source-map' for server chunks
+RUN npm run build
 
-# ── Stage 2: final image ──────────────────────────────────────────────────────
-FROM ghcr.io/open-telemetry/demo:latest-frontend
+# ── Stage 2: production runtime ───────────────────────────────────────────────
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+# --enable-source-maps tells Node.js to resolve .js.map files at runtime so
+# the pprof CPU profiler reports original TypeScript paths in stack frames.
+ENV NODE_OPTIONS=--enable-source-maps
 
-# Copy Splunk OTel package and its dependencies into the app's node_modules
-COPY --from=builder /install/node_modules /app/node_modules
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
 
-# Replace the standard OTel Instrumentation.js require with @splunk/otel/instrument.
-# @splunk/otel wraps the standard SDK and adds CPU/heap AlwaysOn Profiling.
-# SPLUNK_PROFILER_ENABLED=true (set in docker-compose) activates the profiler.
-CMD ["--require=@splunk/otel/instrument", "server.js"]
+COPY --from=next-builder /app/next.config.js ./
+COPY --from=next-builder /app/public ./public
+COPY --from=next-builder /app/package.json ./package.json
+
+# Standalone Next.js output + source maps
+COPY --from=next-builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=next-builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=next-builder --chown=nextjs:nodejs /app/.next/server ./.next/server
+
+# node_modules with @splunk/otel already resolved alongside frontend deps
+COPY --from=next-builder /app/node_modules ./node_modules
+
+USER nextjs
+ENV PORT=8080
+EXPOSE ${PORT}
+
+CMD ["node", "--require=@splunk/otel/instrument", "server.js"]
