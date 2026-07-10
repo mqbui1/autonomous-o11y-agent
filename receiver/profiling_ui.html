@@ -1375,26 +1375,52 @@ function renderExceptionDetail(panel, service, traceId, data) {
   }
 
   let html = '';
-  records.forEach((rec, recIdx) => {
-    const frames   = rec.frames || [];
-    const appFrame = rec.app_frame;
+  const autoOpen = [];  // [{key, file, line}] — app frames to auto-expand after innerHTML
 
-    // Header: exception type + message
+  records.forEach((rec, recIdx) => {
+    const frames    = rec.frames || [];
+    const appFrame  = rec.app_frame;
+    const hasAppSrc = appFrame && appFrame.file && !appFrame.file.startsWith('<');
+
+    // For library-only exceptions (no app frame), pre-populate AI analysis context
+    const excKey = `exc-ai-${recIdx}`;
+    if (!hasAppSrc) {
+      frameContexts[excKey] = {
+        service,
+        blocking_fn:    rec.exc_type  || 'Exception',
+        blocking_file:  '',
+        blocking_line:  0,
+        self_time_ms:   0,
+        app_fn:         rec.exc_type  || 'Exception',
+        app_file:       '',
+        app_line:       0,
+        source_lines:   [],
+        exc_message:    rec.exc_message || '',
+        exc_stacktrace: rec.stacktrace  || '',
+      };
+    }
+
+    // Header: exception type + message; "Analyze & Fix" when all frames are library code
     html += `<div class="exc-detail-header">
-      <div class="exc-detail-type">${esc(rec.exc_type || 'Exception')}</div>
-      <div class="exc-detail-msg">${esc(rec.exc_message || '')}</div>
-      ${data.has_snapshot ? `<div style="margin-top:6px"><span class="exc-snap-badge" style="float:none;display:inline-block">&#127880; Snapshot profiling also available for this trace</span></div>` : ''}
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div class="exc-detail-type">${esc(rec.exc_type || 'Exception')}</div>
+          <div class="exc-detail-msg">${esc(rec.exc_message || '')}</div>
+          ${data.has_snapshot ? `<div style="margin-top:6px"><span class="exc-snap-badge" style="float:none;display:inline-block">&#127880; Snapshot profiling also available for this trace</span></div>` : ''}
+        </div>
+        ${!hasAppSrc ? `<button class="gen-fix-btn" id="gfx-${excKey}" style="flex-shrink:0;margin-top:2px" onclick="generateFix('${excKey}')">✨ Analyze &amp; Fix</button>` : ''}
+      </div>
+      ${!hasAppSrc ? `<div id="fix-${excKey}"></div>` : ''}
     </div>`;
 
-    // Parsed app frames
+    // Parsed stack frames
     if (frames.length) {
       html += `<div class="exc-frames-label">Parsed stack frames (${frames.length})</div>`;
       frames.forEach((f, fi) => {
-        const isApp = appFrame && f.file === appFrame.file && f.line === appFrame.line;
+        const isApp  = appFrame && f.file === appFrame.file && f.line === appFrame.line;
         const canSrc = isApp && f.file && !f.file.startsWith('<');
         const panelKey = `exc-src-${recIdx}-${fi}`;
 
-        // Pre-populate frameContext before building HTML — persists in frameContexts object
         if (canSrc) {
           frameContexts[panelKey] = {
             service,
@@ -1406,6 +1432,7 @@ function renderExceptionDetail(panel, service, traceId, data) {
             app_file:      f.file,
             app_line:      f.line || 0,
           };
+          autoOpen.push({ key: panelKey, file: f.file, line: f.line || 0 });
         }
 
         html += `<div class="exc-frame-row ${isApp ? 'app-frame' : ''}">
@@ -1414,7 +1441,7 @@ function renderExceptionDetail(panel, service, traceId, data) {
           ${canSrc ? `
           <div class="frame-caller" style="margin-top:5px"
                onclick="toggleSource('${panelKey}','${esc(service)}','${esc(f.file)}',${f.line || 0})">
-            <span class="frame-caller-text">&#9656; view source &amp; AI fix</span>
+            <span class="frame-caller-text">&#9654; source &amp; fix</span>
             <button class="src-toggle-btn" id="src-btn-${panelKey}">source ›</button>
           </div>
           <div class="source-panel hidden" id="${panelKey}"></div>` : ''}
@@ -1437,6 +1464,11 @@ function renderExceptionDetail(panel, service, traceId, data) {
   });
 
   panel.innerHTML = html;
+
+  // Auto-load source for app frames — shows highlighted bad code + Generate Fix button immediately
+  for (const { key, file, line } of autoOpen) {
+    toggleSource(key, service, file, line);
+  }
 }
 
 // ── Snapshot trace explorer ────────────────────────────────────────────────
@@ -1565,7 +1597,7 @@ async function selectTrace(service, traceId) {
 async function toggleSource(panelId, service, file, line) {
   const panel = document.getElementById(panelId);
   if (!panel) return;
-  const btn = document.getElementById('src-btn-' + panelId.replace('src-', ''));
+  const btn = document.getElementById('src-btn-' + panelId);
 
   if (!panel.classList.contains('hidden')) {
     panel.classList.add('hidden');
