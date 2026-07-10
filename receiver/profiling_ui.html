@@ -1408,7 +1408,7 @@ function renderExceptionDetail(panel, service, traceId, data) {
           <div class="exc-detail-msg">${esc(rec.exc_message || '')}</div>
           ${data.has_snapshot ? `<div style="margin-top:6px"><span class="exc-snap-badge" style="float:none;display:inline-block">&#127880; Snapshot profiling also available for this trace</span></div>` : ''}
         </div>
-        ${!hasAppSrc ? `<button class="gen-fix-btn" id="gfx-${excKey}" style="flex-shrink:0;margin-top:2px" onclick="generateFix('${excKey}')">✨ Analyze &amp; Fix</button>` : ''}
+        ${!hasAppSrc ? `<button class="gen-fix-btn" id="gfx-${excKey}" style="flex-shrink:0;width:auto;white-space:nowrap;margin-top:2px" onclick="generateFix('${excKey}')">✨ Analyze &amp; Fix</button>` : ''}
       </div>
       ${!hasAppSrc ? `<div id="fix-${excKey}"></div>` : ''}
     </div>`;
@@ -1850,7 +1850,9 @@ function renderTabs(services, snapshots) {
 async function setService(svc) {
   state.activeService = svc;
   state.selectedTrace = null;
+  state.selectedExcTrace = null;
   document.getElementById('frame-panel').innerHTML = '<div class="no-frames">Select a trace to view its slowest frames</div>';
+  document.getElementById('exc-detail-panel').innerHTML = '<div class="no-frames">Select an error trace to inspect the exception</div>';
   renderTabs(state.services);
   refreshUI();
   // Fetch flamegraph + hotspots for the newly selected service immediately
