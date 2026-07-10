@@ -25,8 +25,13 @@ Usage:
 
 import argparse
 import logging
+import faulthandler
 import os
+import signal
 import sys
+
+# Dump all thread stacks to stderr on SIGUSR1 — useful for diagnosing hot threads
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 from pathlib import Path
 
 logging.basicConfig(
@@ -220,10 +225,16 @@ def _run_streaming(agent, config, args, monitor=None):
             time.sleep(3600)
         return
 
-    # Streaming + batch: run assessments on schedule alongside the receiver
-    interval_minutes = args.interval if args.watch else 60
+    # Streaming + batch: run assessments on schedule (--watch) or trigger-only (default)
+    interval_minutes = args.interval if args.watch else None
     run_count = 0
-    logger.info("Batch assessments will run every %d minutes.", interval_minutes)
+
+    if args.watch:
+        logger.info("Batch assessments will run every %d minutes (or on manual trigger).", interval_minutes)
+    else:
+        logger.info("Trigger-only mode — waiting for POST /api/assessment/trigger.")
+        trigger_event.wait()   # block until first manual trigger
+        trigger_event.clear()
 
     while True:
         run_count += 1
@@ -250,8 +261,12 @@ def _run_streaming(agent, config, args, monitor=None):
         print(output)
         print(f"{'='*70}\n")
 
-        logger.info("[Batch run %d] Next run in %d minutes (or on trigger).", run_count, interval_minutes)
-        trigger_event.wait(timeout=interval_minutes * 60)
+        if args.watch:
+            logger.info("[Batch run %d] Next run in %d minutes (or on trigger).", run_count, interval_minutes)
+            trigger_event.wait(timeout=interval_minutes * 60)
+        else:
+            logger.info("[Batch run %d] Done. Waiting for next manual trigger.", run_count)
+            trigger_event.wait()   # wait indefinitely for next manual trigger
         trigger_event.clear()
 
 

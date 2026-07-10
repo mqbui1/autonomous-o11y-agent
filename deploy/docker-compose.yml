@@ -93,6 +93,7 @@ services:
     volumes:
       - agent-state:/root/.o11y-agent
       - ~/.aws/credentials:/root/.aws/credentials:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # source reader: read files from service containers
       - ../../auto-detector-provisioner:/opt/auto-detector-provisioner:ro
       - ../../o11y-instrumentation-analyzer:/opt/o11y-instrumentation-analyzer:ro
       - ../../o11y-usage-governance:/opt/o11y-usage-governance:ro
@@ -191,7 +192,7 @@ services:
       - FLAGD_PORT=8013
       - PAYMENT_ADDR=payment:50051
       - PRODUCT_CATALOG_ADDR=product-catalog:3550
-      - SHIPPING_ADDR=shipping:50050
+      - SHIPPING_ADDR=http://shipping:50050
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
@@ -271,8 +272,8 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: profiling/Dockerfile.frontend
+      context: /Users/mbui/Documents/opentelemetry-demo
+      dockerfile: /Users/mbui/Documents/autonomous-o11y-agent/deploy/profiling/Dockerfile.frontend
     image: astroshop-frontend-splunk
     container_name: frontend
     restart: unless-stopped
@@ -287,7 +288,7 @@ services:
       - CURRENCY_ADDR=currency:7001
       - PRODUCT_CATALOG_ADDR=product-catalog:3550
       - RECOMMENDATION_ADDR=recommendation:9001
-      - SHIPPING_ADDR=shipping:50050
+      - SHIPPING_ADDR=http://shipping:50050
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
       - OTEL_SERVICE_NAME=frontend
@@ -440,6 +441,8 @@ services:
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
+    volumes:
+      - ./locustfile.py:/usr/src/app/locustfile.py:ro
     depends_on:
       frontend:
         condition: service_started
@@ -565,6 +568,8 @@ services:
     environment:
       - SHIPPING_PORT=50050
       - QUOTE_ADDR=http://quote:8090
+      - FLAGD_HOST=flagd
+      - FLAGD_PORT=8013
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
       - OTEL_SERVICE_NAME=shipping
