@@ -43,6 +43,33 @@ _ISSUE_META = {
     "other":                  ("Performance Issue",        "#64748b"),
 }
 
+_EXC_SYSTEM = """\
+You are an expert software reliability engineer. Given an exception stack trace from a
+production service, identify the root cause and suggest a concrete fix.
+
+Respond with ONLY a valid JSON object — no markdown code fences, no preamble, no trailing text.
+Required fields:
+{
+  "issue_type": "configuration_error|missing_implementation|network_error|invalid_input|timeout|other",
+  "issue_summary": "one-line problem description (max 80 chars)",
+  "why_issue": "2-3 sentences explaining WHY this exception occurs: what the code is doing, what assumption is violated, and how it manifests in production",
+  "what_fix_solves": "2-3 sentences explaining what the fix does: what configuration change, code fix, or deployment step eliminates the exception",
+  "explanation": "1-2 sentences summarising the change for a changelog or PR description",
+  "diff": "unified diff string if a code change applies, otherwise empty string",
+  "estimated_impact": "concrete outcome e.g. 'Eliminates gRPC UNIMPLEMENTED errors on /Recommend endpoint'",
+  "confidence": "high|medium|low"
+}
+If the fix is purely operational (config/deployment), set diff to "" and explain in what_fix_solves."""
+
+_EXC_ISSUE_META = {
+    "configuration_error":    ("Config Error",           "#f59e0b"),
+    "missing_implementation": ("Missing Implementation", "#ef4444"),
+    "network_error":          ("Network Error",          "#3b82f6"),
+    "invalid_input":          ("Invalid Input",          "#8b5cf6"),
+    "timeout":                ("Timeout",                "#ec4899"),
+    "other":                  ("Exception",              "#64748b"),
+}
+
 
 def _hint_issue_type(blocking_file: str, blocking_fn: str) -> str:
     f  = (blocking_file or "").lower()
@@ -94,28 +121,61 @@ line {app_line} of {short_app_file}. The diff file paths should use \
 """
 
 
+def _build_exception_prompt(service: str, exc_type: str, exc_message: str, stacktrace: str) -> str:
+    return f"""## Exception Trace
+
+Service:        {service}
+Exception type: {exc_type}
+Message:        {exc_message}
+
+## Stack Trace
+
+```
+{stacktrace}
+```
+
+Analyze this exception and generate a concrete fix targeting the root cause, not just the symptoms.
+"""
+
+
 def generate_fix(provider, data: dict) -> dict:
     """
     Call the LLM and return a structured fix dict.
 
-    Expected keys in data: service, blocking_fn, blocking_file, blocking_line,
+    For profiling hotspots: expects service, blocking_fn, blocking_file, blocking_line,
     self_time_ms, app_fn, app_file, app_line, source_lines.
+
+    For exception-only analysis (no source): expects service, blocking_fn/app_fn,
+    exc_message, exc_stacktrace. source_lines must be absent or empty.
 
     Returns dict with: issue_type, issue_summary, explanation, diff,
     estimated_impact, confidence, label, color.
     On error: returns {error: "..."}.
     """
-    required = ("service", "blocking_fn", "blocking_file", "blocking_line",
-                "self_time_ms", "app_fn", "app_file", "app_line", "source_lines")
-    missing = [k for k in required if k not in data]
-    if missing:
-        return {"error": f"Missing fields: {missing}"}
+    has_source = bool(data.get("source_lines"))
 
-    prompt = build_prompt(**{k: data[k] for k in required})
+    if has_source:
+        required = ("service", "blocking_fn", "blocking_file", "blocking_line",
+                    "self_time_ms", "app_fn", "app_file", "app_line", "source_lines")
+        missing = [k for k in required if k not in data]
+        if missing:
+            return {"error": f"Missing fields: {missing}"}
+        prompt  = build_prompt(**{k: data[k] for k in required})
+        system  = _SYSTEM
+        meta    = _ISSUE_META
+    else:
+        prompt  = _build_exception_prompt(
+            service     = data.get("service", "unknown"),
+            exc_type    = data.get("blocking_fn") or data.get("app_fn") or "Exception",
+            exc_message = data.get("exc_message", ""),
+            stacktrace  = data.get("exc_stacktrace", ""),
+        )
+        system  = _EXC_SYSTEM
+        meta    = {**_ISSUE_META, **_EXC_ISSUE_META}
 
     try:
         result = provider.converse(
-            system_prompt=_SYSTEM,
+            system_prompt=system,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             tools=[],
         )
@@ -138,7 +198,7 @@ def generate_fix(provider, data: dict) -> dict:
         return {"error": f"JSON parse error: {exc}. Preview: {raw[:400]}"}
 
     issue_type = out.get("issue_type", "other")
-    label, color = _ISSUE_META.get(issue_type, _ISSUE_META["other"])
+    label, color = meta.get(issue_type, meta.get("other", ("Exception", "#64748b")))
     out["label"] = label
     out["color"] = color
     return out
