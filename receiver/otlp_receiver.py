@@ -20,7 +20,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from flask import Flask, Response, request
+import os
+from flask import Flask, Response, request, send_file
 
 if TYPE_CHECKING:
     from streaming.pipeline import StreamingPipeline
@@ -171,6 +172,129 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
                 status=500, mimetype="application/json",
             )
 
+    @app.get("/api/profiling/callgraph/<service>/<trace_id>")
+    def callgraph_lookup(service, trace_id):
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import snapshot_store as ss
+            methods = ss.get_slowest_methods(service, trace_id, limit=10)
+            return Response(
+                json.dumps({'service': service, 'trace_id': trace_id, 'slowest_methods': methods, 'found': bool(methods)}),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(json.dumps({'error': str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/profiling/snapshot")
+    def snapshot_debug():
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import snapshot_store as ss
+            with ss._store._lock:
+                keys = []
+                for (svc, tid), recs in ss._store._records.items():
+                    arrived_at = max((r['ts'] for r in recs), default=0)
+                    keys.append({
+                        'service': svc, 'trace_id': tid,
+                        'record_count': len(recs), 'arrived_at': arrived_at,
+                    })
+            return Response(
+                json.dumps({'total_traces': len(keys), 'traces': keys}),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(json.dumps({'error': str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/profiling/flamegraph/<service>")
+    def flamegraph_data(service):
+        """Return all AlwaysOn CPU frames for a service (for the UI icicle chart)."""
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import profiling_store as ps
+            env = environment or (pipeline.environment if hasattr(pipeline, "environment") else "")
+            since = float(request.args.get("since", 0) or 0)
+            until = float(request.args.get("until", 0) or 0)
+            frames = ps.get_flamegraph(service, env, since=since, until=until)
+            return Response(
+                json.dumps({"service": service, "environment": env, "frames": frames}),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/profiling/hotspots/<service>")
+    def hotspots_data(service):
+        """Return aggregated method hotspots across all snapshot traces for a service."""
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import snapshot_store as ss
+            since = float(request.args.get("since", 0) or 0)
+            until = float(request.args.get("until", 0) or 0)
+            data = ss.get_hotspots(service, since=since, until=until)
+            return Response(json.dumps(data), status=200, mimetype="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/exceptions")
+    def exceptions_list():
+        """Return recent exception summaries (newest first). Optional ?service= filter."""
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import exception_store as es, snapshot_store as ss
+            svc   = request.args.get("service") or None
+            limit = int(request.args.get("limit", 200) or 200)
+            data  = es.list_recent(service=svc, limit=limit)
+            for item in data:
+                item["has_snapshot"] = ss.has_data(item["service"], item["trace_id"])
+            return Response(json.dumps({"exceptions": data, "count": len(data)}),
+                            status=200, mimetype="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/exceptions/<service>/<trace_id>")
+    def exception_detail(service, trace_id):
+        """Return full exception records (with parsed frames) for a specific trace."""
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import exception_store as es, snapshot_store as ss
+            records = es.get(service, trace_id)
+            has_snapshot = ss.has_data(service, trace_id)
+            return Response(
+                json.dumps({
+                    "service":      service,
+                    "trace_id":     trace_id,
+                    "records":      records,
+                    "has_snapshot": has_snapshot,
+                }),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/profiling")
+    def profiling_ui():
+        """Serve the profiling flamegraph + snapshot UI."""
+        ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiling_ui.html")
+        return send_file(ui_path, mimetype="text/html")
+
     # ── Assessment API (serves UI data to the Supervisor) ─────────────────────
 
     @app.get("/api/assessment/latest")
@@ -242,6 +366,72 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             json.dumps({"running": running, "queued": queued, "progress": progress}),
             status=200, mimetype="application/json",
         )
+
+    @app.post("/api/fix")
+    def code_fix():
+        """
+        Generate a code fix for a profiling hotspot using the LLM.
+
+        POST body (JSON): service, blocking_fn, blocking_file, blocking_line,
+        self_time_ms, app_fn, app_file, app_line, source_lines.
+        """
+        import sys as _sys, os as _os
+        agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if agent_root not in _sys.path:
+            _sys.path.insert(0, agent_root)
+        from receiver.fix_generator import generate_fix as _generate_fix
+
+        body = request.get_json(force=True, silent=True) or {}
+        if not body:
+            return Response(
+                json.dumps({"error": "Request body required"}),
+                status=400, mimetype="application/json",
+            )
+        try:
+            # Build a minimal config from env vars — avoid AgentConfig's required Splunk args
+            import os as _os2
+            from providers.bedrock import BedrockProvider as _BP
+            from providers.openai_compat import OpenAICompatProvider as _OAP
+            _llm = _os2.environ.get("LLM_PROVIDER", "bedrock").lower()
+            if _llm in ("ollama", "openai"):
+                _provider = _OAP(
+                    base_url=_os2.environ.get("OPENAI_BASE_URL", _os2.environ.get("OLLAMA_BASE_URL", "")),
+                    api_key=_os2.environ.get("OPENAI_API_KEY", "ollama"),
+                    model=_os2.environ.get("OPENAI_MODEL", _os2.environ.get("OLLAMA_MODEL", "")),
+                )
+            else:
+                _provider = _BP(
+                    model_id=_os2.environ.get("BEDROCK_MODEL_ID", ""),
+                    region=_os2.environ.get("AWS_DEFAULT_REGION", "us-west-2"),
+                )
+            result = _generate_fix(_provider, body)
+        except Exception as exc:
+            logger.error("Fix generation error: %s", exc, exc_info=True)
+            result = {"error": str(exc)}
+        return Response(json.dumps(result), status=200, mimetype="application/json")
+
+    @app.get("/api/source")
+    def source_view():
+        """
+        Return source lines for a file inside a service container.
+        Query params: service, file, line (1-based), context (lines around target).
+        """
+        import sys as _sys, os as _os
+        agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if agent_root not in _sys.path:
+            _sys.path.insert(0, agent_root)
+        from receiver.source_reader import read_source as _read_source
+        svc  = request.args.get("service", "")
+        file = request.args.get("file", "")
+        line = int(request.args.get("line", 0) or 0)
+        ctx  = int(request.args.get("context", 25) or 25)
+        if not svc or not file:
+            return Response(
+                json.dumps({"error": "service and file params required"}),
+                status=400, mimetype="application/json",
+            )
+        data = _read_source(svc, file, line=line, context=ctx)
+        return Response(json.dumps(data), status=200, mimetype="application/json")
 
     @app.post("/api/assessment/trigger")
     def assessment_trigger():

@@ -21,7 +21,7 @@ from .attribute_checker import AttributeChecker
 from .cardinality_tracker import CardinalityTracker
 from .service_tracker import ServiceTracker
 from .log_tracker import LogTracker
-from . import profiling_store
+from . import profiling_store, snapshot_store, exception_store
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,25 @@ class StreamingPipeline:
                     self.pii_scanner.scan_span(service, span_name, merged)
                     self.attribute_checker.check_span(service, span_name, merged)
 
+                    # Extract exception events and route to exception_store
+                    trace_id = span.get("traceId", "")
+                    if trace_id:
+                        for event in span.get("events", []):
+                            if event.get("name") == "exception":
+                                event_attrs = _parse_attributes(event.get("attributes", []))
+                                exc_type  = event_attrs.get("exception.type", "")
+                                exc_msg   = event_attrs.get("exception.message", "")
+                                exc_stack = event_attrs.get("exception.stacktrace", "")
+                                if exc_type or exc_stack:
+                                    exception_store.observe(
+                                        service=service,
+                                        trace_id=trace_id,
+                                        span_name=span_name,
+                                        exc_type=exc_type,
+                                        exc_message=exc_msg,
+                                        stacktrace=exc_stack,
+                                    )
+
     # ── OTLP/metrics ─────────────────────────────────────────────────────────
 
     def process_resource_metrics(self, resource_metrics: list[dict]):
@@ -191,18 +210,27 @@ class StreamingPipeline:
                     body = body_container.get("stringValue", "") or str(body_container)
                     record_attrs = _parse_attributes(record.get("attributes", []))
 
-                    # Route profiling records to the local profiling store
+                    # Route profiling records to the appropriate local store
                     if record_attrs.get("com.splunk.sourcetype") == "otel.profiling":
-                        data_type = record_attrs.get("profiling.data.type", "cpu")
                         data_format = record_attrs.get("profiling.data.format", "")
+                        instr_source = record_attrs.get("profiling.instrumentation.source", "continuous")
                         environment = resource_attrs.get("deployment.environment", "unknown")
-                        profiling_store.observe(
-                            service=service,
-                            environment=environment,
-                            data_type=data_type,
-                            body=body,
-                            data_format=data_format,
-                        )
+                        if instr_source == "snapshot":
+                            # Snapshot (call-graph) profiling: index by trace_id
+                            snapshot_store.observe(
+                                service=service,
+                                body=body,
+                                data_format=data_format,
+                            )
+                        else:
+                            # AlwaysOn (continuous) profiling: index by service+env
+                            profiling_store.observe(
+                                service=service,
+                                environment=environment,
+                                data_type=record_attrs.get("profiling.data.type", "cpu"),
+                                body=body,
+                                data_format=data_format,
+                            )
                         continue
 
                     self.log_tracker.observe_log(
