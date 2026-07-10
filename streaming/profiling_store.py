@@ -18,12 +18,16 @@ Data flow:
 
 import base64
 import gzip
+import logging
 import threading
 import time
 from collections import defaultdict, deque
 
-_WINDOW_SECONDS = 600   # keep profiles from last 10 minutes
-_MAXLEN = 5             # ring buffer depth per (service, env)
+logger = logging.getLogger(__name__)
+
+_WINDOW_SECONDS = 1800  # keep profiles from last 30 minutes
+_MAXLEN = 180           # ring buffer depth per (service, env)
+                        # @ 10s sampling interval = 30 min of history
 
 _PROFILING_SOURCETYPE = "otel.profiling"
 
@@ -65,15 +69,19 @@ class ProfilingStore:
                 if env == environment and any(r["ts"] > cutoff for r in records)
             )
 
-    def get_flamegraph(self, service: str, environment: str) -> list[dict]:
-        """Merge CPU frames from recent records, return top frames by sample count."""
-        cutoff = time.time() - _WINDOW_SECONDS
+    def get_flamegraph(
+        self, service: str, environment: str, since: float = 0, until: float = 0
+    ) -> list[dict]:
+        """Merge CPU frames from records within the given time window."""
+        default_cutoff = time.time() - _WINDOW_SECONDS
+        since_ts = max(since, default_cutoff) if since else default_cutoff
+        until_ts = until if until else float("inf")
         with self._lock:
             records = list(self._records.get((service, environment), []))
 
         combined: dict[str, dict] = {}
         for rec in records:
-            if rec["ts"] < cutoff or rec["data_type"] != "cpu":
+            if rec["ts"] < since_ts or rec["ts"] > until_ts or rec["data_type"] != "cpu":
                 continue
             for frame in rec["frames"]:
                 key = f"{frame.get('file', '')}:{frame.get('function', '')}"
@@ -111,8 +119,8 @@ def get_services(environment: str) -> list[str]:
     return _store.get_services(environment)
 
 
-def get_flamegraph(service: str, environment: str) -> list[dict]:
-    return _store.get_flamegraph(service, environment)
+def get_flamegraph(service: str, environment: str, since: float = 0, until: float = 0) -> list[dict]:
+    return _store.get_flamegraph(service, environment, since=since, until=until)
 
 
 # ── Minimal pprof decoder (pure stdlib — no protobuf dependency) ──────────────
@@ -220,6 +228,9 @@ def _decode_pprof(b64: str) -> list[dict]:
                     count += sum(_packed_varints(vval))
                 elif vwt == 0:
                     count += vval
+            # Splunk AlwaysOn pprof omits sample values — each sample = 1 CPU unit
+            if count == 0:
+                count = 1
             for lwt, lval in sv.get(1, []):
                 if lwt == 2 and isinstance(lval, bytes):
                     for lid in _packed_varints(lval):
@@ -240,5 +251,6 @@ def _decode_pprof(b64: str) -> list[dict]:
             frames.append({"function": name, "file": file_, "line": sline, "samples": cnt})
         return frames[:30]
 
-    except Exception:
+    except Exception as _exc:
+        logger.debug("pprof decode error: %s", _exc)
         return []

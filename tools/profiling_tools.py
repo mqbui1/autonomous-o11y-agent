@@ -617,6 +617,32 @@ def get_slowest_methods(
 
     limit = min(limit, 5)
 
+    # ── Local snapshot store (primary path) ──────────────────────────────────
+    # The Splunk /v2/call-graphs/ public API route is not exposed externally.
+    # The agent's OTLP receiver captures snapshot pprof logs fanned out from
+    # the OTel Collector and indexes them locally by (service, trace_id).
+    try:
+        from streaming import snapshot_store as _ss
+        local_methods = _ss.get_slowest_methods(service, trace_id, limit)
+        if local_methods:
+            total_self_ms = sum(m["self_time_ms"] for m in local_methods)
+            return json.dumps({
+                "service": service,
+                "trace_id": trace_id,
+                "profiling_available": True,
+                "source": "local_snapshot_store",
+                "slowest_methods": local_methods,
+                "total_self_time_ms": round(total_self_ms, 2),
+                "metadata": {
+                    "window_from_ms": from_epoch_ms,
+                    "window_to_ms": to_epoch_ms,
+                    "note": "Data from agent-local snapshot store (pprof fan-out via OTel Collector).",
+                },
+            }, indent=2)
+    except Exception as _exc:
+        logger.debug("Local snapshot store lookup failed: %s", _exc)
+
+    # ── Splunk Call Graph API (fallback — not yet publicly routed) ─────────────
     org_id = _get_org_id()
     if not org_id:
         return json.dumps({
