@@ -100,6 +100,89 @@ class ProfilingStore:
         return result[:30]
 
 
+    def get_memory_flamegraph(
+        self, service: str, environment: str, since: float = 0, until: float = 0
+    ) -> list[dict]:
+        """Merge memory/heap allocation frames from records in the given time window."""
+        default_cutoff = time.time() - _WINDOW_SECONDS
+        since_ts = max(since, default_cutoff) if since else default_cutoff
+        until_ts = until if until else float("inf")
+        with self._lock:
+            records = list(self._records.get((service, environment), []))
+
+        combined: dict[str, dict] = {}
+        for rec in records:
+            if rec["ts"] < since_ts or rec["ts"] > until_ts:
+                continue
+            if rec["data_type"] not in ("heap", "allocation", "memory"):
+                continue
+            for frame in rec["frames"]:
+                key = f"{frame.get('file', '')}:{frame.get('function', '')}"
+                if key in combined:
+                    combined[key]["samples"] += frame["samples"]
+                else:
+                    combined[key] = dict(frame)
+
+        if not combined:
+            return []
+
+        total = sum(f["samples"] for f in combined.values()) or 1
+        result = sorted(combined.values(), key=lambda x: -x["samples"])
+        for f in result:
+            f["pct_cpu"] = round(f["samples"] / total * 100, 1)
+        return result[:30]
+
+    def get_flamegraph_diff(
+        self,
+        service: str,
+        environment: str,
+        window_seconds: int = 300,
+        baseline_offset: int = 900,
+    ) -> list[dict]:
+        """
+        Compare the recent CPU flamegraph against a baseline window.
+
+        current  = [now - window_seconds, now]
+        baseline = [now - baseline_offset - window_seconds, now - baseline_offset]
+
+        Returns functions with |delta| >= 2 pct_cpu, sorted by |delta| desc.
+        """
+        now = time.time()
+        current  = self.get_flamegraph(service, environment,
+                                       since=now - window_seconds, until=now)
+        baseline = self.get_flamegraph(service, environment,
+                                       since=now - baseline_offset - window_seconds,
+                                       until=now - baseline_offset)
+        if not current or not baseline:
+            return []
+
+        curr_map = {f"{f['file']}:{f['function']}": f["pct_cpu"] for f in current}
+        base_map = {f"{f['file']}:{f['function']}": f["pct_cpu"] for f in baseline}
+
+        # Build a lookup from either window for function metadata
+        meta: dict[str, dict] = {}
+        for f in baseline + current:
+            meta[f"{f['file']}:{f['function']}"] = f
+
+        diffs = []
+        for key in set(curr_map) | set(base_map):
+            before = base_map.get(key, 0.0)
+            after  = curr_map.get(key, 0.0)
+            delta  = round(after - before, 1)
+            if abs(delta) < 2.0:
+                continue
+            fn = meta[key]
+            diffs.append({
+                "function":   fn.get("function", ""),
+                "file":       fn.get("file", ""),
+                "before_pct": round(before, 1),
+                "after_pct":  round(after, 1),
+                "delta_pct":  delta,
+            })
+
+        return sorted(diffs, key=lambda x: -abs(x["delta_pct"]))[:20]
+
+
 # ── Module-level singleton ────────────────────────────────────────────────────
 
 _store = ProfilingStore()
@@ -121,6 +204,20 @@ def get_services(environment: str) -> list[str]:
 
 def get_flamegraph(service: str, environment: str, since: float = 0, until: float = 0) -> list[dict]:
     return _store.get_flamegraph(service, environment, since=since, until=until)
+
+
+def get_memory_flamegraph(service: str, environment: str, since: float = 0, until: float = 0) -> list[dict]:
+    return _store.get_memory_flamegraph(service, environment, since=since, until=until)
+
+
+def get_flamegraph_diff(
+    service: str, environment: str,
+    window_seconds: int = 300,
+    baseline_offset: int = 900,
+) -> list[dict]:
+    return _store.get_flamegraph_diff(service, environment,
+                                      window_seconds=window_seconds,
+                                      baseline_offset=baseline_offset)
 
 
 # ── Minimal pprof decoder (pure stdlib — no protobuf dependency) ──────────────
