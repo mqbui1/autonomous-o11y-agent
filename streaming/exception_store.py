@@ -178,6 +178,15 @@ class ExceptionStore:
         with self._lock:
             return (service, tid_hex) in self._records
 
+    def services(self) -> list[str]:
+        """Return all service names that have unexpired exception records."""
+        cutoff = time.time() - _WINDOW_SECONDS
+        with self._lock:
+            return sorted({
+                svc for (svc, _), recs in self._records.items()
+                if any(r["ts"] >= cutoff for r in recs)
+            })
+
     def list_recent(self, service: str | None = None, limit: int = 200) -> list[dict]:
         """
         Return recent exception summaries sorted newest-first.
@@ -238,6 +247,10 @@ def get(service: str, trace_id: str) -> list[dict]:
 
 def has_data(service: str, trace_id: str) -> bool:
     return _store.has_data(service, trace_id)
+
+
+def services() -> list[str]:
+    return _store.services()
 
 
 def list_recent(service: str | None = None, limit: int = 200) -> list[dict]:

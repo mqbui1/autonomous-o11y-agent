@@ -162,8 +162,15 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             for svc in services:
                 frames = ps.get_flamegraph(svc, env)
                 flamegraphs[svc] = {"frame_count": len(frames), "top_frame": frames[0] if frames else None}
+            from streaming import exception_store as es
+            exc_services = es.services()
             return Response(
-                json.dumps({"environment": env, "profiling_services": services, "flamegraphs": flamegraphs}),
+                json.dumps({
+                    "environment": env,
+                    "profiling_services": services,
+                    "exception_services": exc_services,
+                    "flamegraphs": flamegraphs,
+                }),
                 status=200, mimetype="application/json",
             )
         except Exception as exc:
