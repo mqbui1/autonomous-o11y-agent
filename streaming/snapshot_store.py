@@ -262,6 +262,16 @@ def get_hotspots(service: str, since: float = 0, until: float = 0, limit: int = 
     return _store.get_hotspots(service, since=since, until=until, limit=limit)
 
 
+def count_for_service(service: str) -> int:
+    """Return the number of unique snapshot traces for a service in the last 30 min."""
+    cutoff = time.time() - _WINDOW_SECONDS
+    with _store._lock:
+        return sum(
+            1 for (svc, _), recs in _store._records.items()
+            if svc == service and any(r["ts"] >= cutoff for r in recs)
+        )
+
+
 # ── pprof decoder (extract per-sample trace_id labels) ───────────────────────
 #
 # pprof wire format fields used here:

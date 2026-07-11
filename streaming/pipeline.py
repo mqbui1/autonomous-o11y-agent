@@ -245,10 +245,11 @@ class StreamingPipeline:
                             )
                         else:
                             # AlwaysOn (continuous) profiling: index by service+env
+                            data_type = record_attrs.get("profiling.data.type", "cpu")
                             profiling_store.observe(
                                 service=service,
                                 environment=environment,
-                                data_type=record_attrs.get("profiling.data.type", "cpu"),
+                                data_type=data_type,
                                 body=body,
                                 data_format=data_format,
                             )

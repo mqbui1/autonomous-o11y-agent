@@ -304,9 +304,8 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             cpu_frames    = ps.get_flamegraph(service, env)
             memory_frames = ps.get_memory_flamegraph(service, env)
             diff          = ps.get_flamegraph_diff(service, env)
-            exceptions    = es.list_recent(service=service, limit=500)
-            snapshots     = ss.list_recent(service=service)
-            snapshot_count = len(snapshots)
+            exceptions     = es.list_recent(service=service, limit=500)
+            snapshot_count = ss.count_for_service(service)
 
             _llm = os.environ.get("LLM_PROVIDER", "bedrock").lower()
             if _llm in ("ollama", "openai"):

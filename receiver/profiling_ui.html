@@ -2297,7 +2297,14 @@ function setFlamegraphMode(mode) {
 function renderMemoryView(frames) {
   const wrap = document.getElementById('memory-wrap');
   if (!frames || frames.length === 0) {
-    wrap.innerHTML = '<div class="empty" style="padding:24px">No memory allocation profiling data.<br><span style="font-size:11px;color:var(--muted)">Enable with <code>SPLUNK_PROFILER_MEMORY_ENABLED=true</code></span></div>';
+    wrap.innerHTML = `<div class="empty" style="padding:24px">
+      No memory allocation profiling data for this service.<br>
+      <span style="font-size:11px;color:var(--muted);display:block;margin-top:6px;line-height:1.6">
+        Memory profiling is supported for <strong>Node.js</strong> services only (Splunk OTel Node.js distro).<br>
+        Set <code>SPLUNK_PROFILER_MEMORY_ENABLED=true</code> on Node.js services to enable heap allocation data.<br>
+        <em>Python services (recommendation) send CPU profiling only — use the CPU tab.</em>
+      </span>
+    </div>`;
     return;
   }
   const totalSamples = frames.reduce((s, f) => s + f.samples, 0);
