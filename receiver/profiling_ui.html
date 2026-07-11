@@ -1961,10 +1961,12 @@ async function refresh() {
     state.exceptions = excData.exceptions || [];
 
     const svcs = status.profiling_services || [];
-    state.services = svcs;
+    const excSvcs = status.exception_services || [];
+    const allSvcs = [...new Set([...svcs, ...excSvcs])].sort();
+    state.services = allSvcs;
     state.profilingActive = new Set(svcs);
-    if (!state.activeService || !svcs.includes(state.activeService)) {
-      state.activeService = svcs[0] || null;
+    if (!state.activeService || !allSvcs.includes(state.activeService)) {
+      state.activeService = allSvcs[0] || null;
     }
 
     // Fetch flamegraph + hotspots for active service in parallel
