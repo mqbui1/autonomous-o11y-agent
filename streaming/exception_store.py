@@ -119,16 +119,31 @@ class ExceptionStore:
 
     def observe(
         self,
-        service:     str,
-        trace_id:    str,
-        span_name:   str,
-        exc_type:    str,
-        exc_message: str,
-        stacktrace:  str,
+        service:           str,
+        trace_id:          str,
+        span_name:         str,
+        exc_type:          str,
+        exc_message:       str,
+        stacktrace:        str,
+        span_code_frame:   dict | None = None,
+        parent_code_frame: dict | None = None,
     ) -> None:
         tid_hex = trace_id.replace("-", "").lower()
         frames    = _parse_stacktrace(stacktrace)
         app_frame = _find_app_frame(frames)
+
+        # Fallback 1: span's own code.filepath / code.lineno attrs
+        if not app_frame and span_code_frame and span_code_frame.get("file"):
+            f = span_code_frame["file"]
+            if not any(p in f for p in _SKIP_PATTERNS):
+                app_frame = {**span_code_frame, "inferred": True, "inferred_from": "span"}
+
+        # Fallback 2: parent span's code attrs — the app code that initiated the call
+        if not app_frame and parent_code_frame and parent_code_frame.get("file"):
+            f = parent_code_frame["file"]
+            if not any(p in f for p in _SKIP_PATTERNS):
+                app_frame = {**parent_code_frame, "inferred": True, "inferred_from": "parent_span"}
+
         ts = time.time()
 
         with self._lock:
@@ -204,14 +219,17 @@ _store = ExceptionStore()
 
 
 def observe(
-    service:     str,
-    trace_id:    str,
-    span_name:   str,
-    exc_type:    str,
-    exc_message: str,
-    stacktrace:  str,
+    service:           str,
+    trace_id:          str,
+    span_name:         str,
+    exc_type:          str,
+    exc_message:       str,
+    stacktrace:        str,
+    span_code_frame:   dict | None = None,
+    parent_code_frame: dict | None = None,
 ) -> None:
-    _store.observe(service, trace_id, span_name, exc_type, exc_message, stacktrace)
+    _store.observe(service, trace_id, span_name, exc_type, exc_message, stacktrace,
+                   span_code_frame=span_code_frame, parent_code_frame=parent_code_frame)
 
 
 def get(service: str, trace_id: str) -> list[dict]:
