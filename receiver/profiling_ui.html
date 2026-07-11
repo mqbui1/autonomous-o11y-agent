@@ -850,8 +850,11 @@ async function fetchSnapshots() {
   return r.json();
 }
 
-async function fetchExceptions() {
-  const r = await fetch('/api/exceptions');
+async function fetchExceptions(service) {
+  const url = service
+    ? `/api/exceptions?service=${encodeURIComponent(service)}&limit=200`
+    : '/api/exceptions';
+  const r = await fetch(url);
   return r.json();
 }
 
@@ -1896,11 +1899,18 @@ async function setService(svc) {
   document.getElementById('exc-detail-panel').innerHTML = '<div class="no-frames">Select an error trace to inspect the exception</div>';
   renderTabs(state.services);
   refreshUI();
-  // Fetch flamegraph + hotspots for the newly selected service immediately
   try {
-    const [fg, hs] = await Promise.all([fetchFlamegraph(svc), fetchHotspots(svc)]);
+    const [fg, hs, excData] = await Promise.all([
+      fetchFlamegraph(svc),
+      fetchHotspots(svc),
+      fetchExceptions(svc),
+    ]);
     state.flamegraphs[svc] = fg.frames || [];
     state.hotspots[svc] = hs;
+    // Merge service-specific exceptions into global list (keyed by service+trace_id)
+    const excMap = new Map(state.exceptions.map(e => [e.service + e.trace_id, e]));
+    for (const e of (excData.exceptions || [])) excMap.set(e.service + e.trace_id, e);
+    state.exceptions = [...excMap.values()];
     refreshUI();
   } catch (_) {}
 }
