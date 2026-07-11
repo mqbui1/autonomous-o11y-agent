@@ -120,6 +120,17 @@ class StreamingPipeline:
           }
         ]
         """
+        # First pass: build span_id → attrs lookup across the full batch so
+        # exception spans can resolve their parent span's code location.
+        span_lookup: dict[str, dict] = {}
+        for rs in resource_spans:
+            for scope in rs.get("scopeSpans", []):
+                for span in scope.get("spans", []):
+                    sid = span.get("spanId", "")
+                    if sid:
+                        span_lookup[sid] = _parse_attributes(span.get("attributes", []))
+
+        # Second pass: full processing
         for rs in resource_spans:
             resource_attrs = _parse_attributes(
                 rs.get("resource", {}).get("attributes", [])
@@ -147,6 +158,14 @@ class StreamingPipeline:
                                 exc_msg   = event_attrs.get("exception.message", "")
                                 exc_stack = event_attrs.get("exception.stacktrace", "")
                                 if exc_type or exc_stack:
+                                    # Resolve code location from span attrs and parent span
+                                    span_code_frame = _extract_code_frame(span_attrs)
+                                    parent_code_frame = None
+                                    parent_sid = span.get("parentSpanId", "")
+                                    if parent_sid and parent_sid in span_lookup:
+                                        parent_code_frame = _extract_code_frame(
+                                            span_lookup[parent_sid]
+                                        )
                                     exception_store.observe(
                                         service=service,
                                         trace_id=trace_id,
@@ -154,6 +173,8 @@ class StreamingPipeline:
                                         exc_type=exc_type,
                                         exc_message=exc_msg,
                                         stacktrace=exc_stack,
+                                        span_code_frame=span_code_frame,
+                                        parent_code_frame=parent_code_frame,
                                     )
 
     # ── OTLP/metrics ─────────────────────────────────────────────────────────
@@ -275,6 +296,27 @@ def _parse_attributes(attr_list: list[dict]) -> dict:
             elif "kvlistValue" in value_container:
                 result[key] = value_container["kvlistValue"]
     return result
+
+
+def _extract_code_frame(attrs: dict) -> dict | None:
+    """
+    Extract a code location frame from span attributes.
+
+    Checks code.filepath / code.lineno / code.function (OTel semantic conventions).
+    Returns None if no filepath is present.
+    """
+    filepath = attrs.get("code.filepath") or attrs.get("code.namespace") or ""
+    if not filepath:
+        return None
+    try:
+        line = int(attrs.get("code.lineno", 0) or 0)
+    except (ValueError, TypeError):
+        line = 0
+    return {
+        "file":     str(filepath),
+        "line":     line,
+        "function": str(attrs.get("code.function", "") or ""),
+    }
 
 
 def _extract_data_points(metric: dict) -> list[dict]:

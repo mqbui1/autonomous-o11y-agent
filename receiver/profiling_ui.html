@@ -1414,10 +1414,13 @@ function renderExceptionDetail(panel, service, traceId, data) {
     </div>`;
 
     // Parsed stack frames
+    const inferredFrame = hasAppSrc && appFrame && appFrame.inferred ? appFrame : null;
+    const stackAppFrame = hasAppSrc && !inferredFrame ? appFrame : null;
+
     if (frames.length) {
       html += `<div class="exc-frames-label">Parsed stack frames (${frames.length})</div>`;
       frames.forEach((f, fi) => {
-        const isApp  = appFrame && f.file === appFrame.file && f.line === appFrame.line;
+        const isApp  = stackAppFrame && f.file === stackAppFrame.file && f.line === stackAppFrame.line;
         const canSrc = isApp && f.file && !f.file.startsWith('<');
         const panelKey = `exc-src-${recIdx}-${fi}`;
 
@@ -1447,6 +1450,44 @@ function renderExceptionDetail(panel, service, traceId, data) {
           <div class="source-panel hidden" id="${panelKey}"></div>` : ''}
         </div>`;
       });
+    }
+
+    // Inferred calling context — app frame resolved from span/parent span attributes
+    // rather than the exception stacktrace (common for transport-layer exceptions)
+    if (inferredFrame && inferredFrame.file && !inferredFrame.file.startsWith('<')) {
+      const panelKey = `exc-src-${recIdx}-inferred`;
+      const srcLabel = inferredFrame.inferred_from === 'parent_span'
+        ? 'App code that initiated this call (from parent span)'
+        : 'App code location (from span attributes)';
+
+      frameContexts[panelKey] = {
+        service,
+        blocking_fn:   rec.exc_type || inferredFrame.function || 'Error',
+        blocking_file: inferredFrame.file,
+        blocking_line: inferredFrame.line || 0,
+        self_time_ms:  0,
+        app_fn:        inferredFrame.function || 'unknown',
+        app_file:      inferredFrame.file,
+        app_line:      inferredFrame.line || 0,
+      };
+      autoOpen.push({ key: panelKey, file: inferredFrame.file, line: inferredFrame.line || 0 });
+
+      html += `<div style="padding:8px 12px 0">
+        <div style="font-size:10px;color:var(--accent2);font-weight:600;margin-bottom:5px">
+          &#8593; ${esc(srcLabel)}
+        </div>
+        <div class="exc-frame-row app-frame">
+          <div class="exc-frame-fn">${esc(inferredFrame.function || 'unknown')}</div>
+          <div class="exc-frame-loc">${esc(shortPath(inferredFrame.file))}${inferredFrame.line ? ':' + inferredFrame.line : ''}</div>
+          <div class="frame-caller" style="margin-top:5px"
+               onclick="toggleSource('${panelKey}','${esc(service)}','${esc(inferredFrame.file)}',${inferredFrame.line || 0})">
+            <span class="frame-caller-text">&#9654; source &amp; fix</span>
+            <button class="src-toggle-btn" id="src-btn-${panelKey}">source ›</button>
+          </div>
+          <div class="source-panel hidden" id="${panelKey}"></div>
+        </div>
+      </div>`
+      ;
     }
 
     // Raw stacktrace (collapsible)
