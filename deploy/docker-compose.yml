@@ -303,6 +303,7 @@ services:
       # Standard OTel demo image ignores these; swap IMAGE_NAME to a Splunk-instrumented
       # build to activate. Vars are pre-set here so profiling works immediately on upgrade.
       - SPLUNK_PROFILER_ENABLED=true
+      - SPLUNK_PROFILER_MEMORY_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
       - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
       # Snapshot / Call Graph Profiling — trace-correlated stack captures.
@@ -469,6 +470,7 @@ services:
       - OTEL_SERVICE_NAME=payment
       # AlwaysOn Profiling — Node.js, requires @splunk/otel
       - SPLUNK_PROFILER_ENABLED=true
+      - SPLUNK_PROFILER_MEMORY_ENABLED=true
       - SPLUNK_PROFILER_CALL_STACK_INTERVAL=10000
       - SPLUNK_PROFILER_LOGS_ENDPOINT=http://otel-collector:4318
       # Snapshot / Call Graph Profiling — trace-correlated stack captures.
@@ -547,6 +549,7 @@ services:
       # uses the gRPC exporter protocol — gRPC on port 4318 (HTTP) would fail.
       # Without this var, profiling logs use the main gRPC endpoint (4317) instead.
       - SPLUNK_PROFILER_ENABLED=true
+      # Note: SPLUNK_PROFILER_MEMORY_ENABLED is Node.js-only; not supported by Python SDK.
       # Snapshot / Call Graph Profiling — trace-correlated stack captures.
       # Different from SPLUNK_PROFILER_ENABLED (AlwaysOn aggregate flamegraphs).
       # Selection probability bumped to 10% (default 1%) for testing.
