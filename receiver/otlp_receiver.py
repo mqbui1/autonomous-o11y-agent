@@ -254,6 +254,86 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
         except Exception as exc:
             return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
 
+    @app.get("/api/profiling/memory/<service>")
+    def memory_flamegraph(service):
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import profiling_store as ps
+            env = environment or ""
+            since = float(request.args.get("since", 0) or 0)
+            until = float(request.args.get("until", 0) or 0)
+            frames = ps.get_memory_flamegraph(service, env, since=since, until=until)
+            return Response(json.dumps({"frames": frames}), status=200, mimetype="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.get("/api/profiling/diff/<service>")
+    def flamegraph_diff(service):
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import profiling_store as ps
+            env = environment or ""
+            window   = int(request.args.get("window", 300) or 300)
+            baseline = int(request.args.get("baseline_offset", 900) or 900)
+            diff = ps.get_flamegraph_diff(service, env,
+                                          window_seconds=window,
+                                          baseline_offset=baseline)
+            return Response(json.dumps({"diff": diff}), status=200, mimetype="application/json")
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
+    @app.post("/api/profiling/narrative/<service>")
+    def service_narrative(service):
+        try:
+            import sys as _sys, os as _os, os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import profiling_store as ps, exception_store as es, snapshot_store as ss
+            from receiver.narrative_generator import generate_narrative as _gen_narrative
+            from providers.bedrock import BedrockProvider as _BP
+            from providers.openai_compat import OpenAICompatProvider as _OAP
+
+            env = environment or ""
+            cpu_frames    = ps.get_flamegraph(service, env)
+            memory_frames = ps.get_memory_flamegraph(service, env)
+            diff          = ps.get_flamegraph_diff(service, env)
+            exceptions    = es.list_recent(service=service, limit=500)
+            snapshots     = ss.list_recent(service=service)
+            snapshot_count = len(snapshots)
+
+            _llm = os.environ.get("LLM_PROVIDER", "bedrock").lower()
+            if _llm in ("ollama", "openai"):
+                _provider = _OAP(
+                    base_url=os.environ.get("OPENAI_BASE_URL", os.environ.get("OLLAMA_BASE_URL", "")),
+                    api_key=os.environ.get("OPENAI_API_KEY", "ollama"),
+                    model=os.environ.get("OPENAI_MODEL", os.environ.get("OLLAMA_MODEL", "")),
+                )
+            else:
+                _provider = _BP(
+                    model_id=os.environ.get("BEDROCK_MODEL_ID", ""),
+                    region=os.environ.get("AWS_DEFAULT_REGION", "us-west-2"),
+                )
+
+            result = _gen_narrative(_provider, {
+                "service":        service,
+                "cpu_frames":     cpu_frames,
+                "memory_frames":  memory_frames,
+                "exceptions":     exceptions,
+                "diff":           diff,
+                "snapshot_count": snapshot_count,
+            })
+            return Response(json.dumps(result), status=200, mimetype="application/json")
+        except Exception as exc:
+            logger.error("Narrative error: %s", exc, exc_info=True)
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
     @app.get("/api/exceptions")
     def exceptions_list():
         """Return recent exception summaries (newest first). Optional ?service= filter."""

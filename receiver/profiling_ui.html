@@ -535,6 +535,74 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .gen-fix-btn:hover { opacity: 0.88; }
 .gen-fix-btn:disabled { opacity: 0.5; cursor: default; }
 
+/* ── Service Health Narrative ── */
+.narrative-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+}
+.narrative-sev {
+  font-size: 11px; font-weight: 700; padding: 2px 9px;
+  border-radius: 10px; letter-spacing: 0.4px; white-space: nowrap;
+}
+.narrative-sev.critical { background: rgba(239,68,68,0.18); color: #f87171; }
+.narrative-sev.warning  { background: rgba(245,158,11,0.18); color: #fbbf24; }
+.narrative-sev.healthy  { background: rgba(34,197,94,0.18);  color: #4ade80; }
+.narrative-score {
+  font-size: 20px; font-weight: 800; min-width: 36px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.narrative-score.critical { color: #f87171; }
+.narrative-score.warning  { color: #fbbf24; }
+.narrative-score.healthy  { color: #4ade80; }
+.narrative-summary { font-size: 12px; color: var(--text); line-height: 1.6; flex: 1; }
+.narrative-findings { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 6px; }
+.finding {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 10px; border-radius: 5px; background: var(--surface2);
+}
+.finding-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; margin-top: 4px;
+}
+.finding-dot.critical { background: #f87171; }
+.finding-dot.warning  { background: #fbbf24; }
+.finding-dot.info     { background: #60a5fa; }
+.finding-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.finding-detail { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.narrative-btn {
+  background: none; border: 1px solid var(--border); color: var(--accent2);
+  border-radius: 5px; padding: 4px 12px; font-size: 11px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; transition: background 0.15s;
+}
+.narrative-btn:hover { background: var(--surface2); }
+.narrative-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Flamegraph mode tabs ── */
+.fg-mode-tabs { display: flex; gap: 2px; margin-left: auto; }
+.fg-mode-btn {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 4px; padding: 2px 9px; font-size: 11px; cursor: pointer;
+}
+.fg-mode-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(255,107,53,0.08); }
+
+/* ── Regression diff table ── */
+.diff-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.diff-table th {
+  text-align: left; padding: 5px 8px; color: var(--muted); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+}
+.diff-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.diff-table tr:last-child td { border-bottom: none; }
+.diff-table tr:hover td { background: var(--surface2); }
+.diff-fn  { font-family: monospace; font-weight: 600; }
+.diff-file { font-family: monospace; font-size: 10px; color: var(--muted); }
+.diff-pct  { font-family: monospace; font-weight: 700; text-align: right; }
+.diff-delta { font-family: monospace; font-weight: 800; text-align: right; min-width: 52px; }
+.diff-delta.up   { color: #f87171; }
+.diff-delta.down { color: #4ade80; }
+.diff-bar-wrap { width: 80px; }
+.diff-bar-bg { background: var(--surface2); border-radius: 2px; height: 5px; overflow: hidden; }
+.diff-bar-fill { height: 100%; border-radius: 2px; }
+
 /* ── Exception Trace Analysis card ── */
 .exc-type-badge {
   display: inline-block; font-family: monospace; font-size: 10px; font-weight: 700;
@@ -675,16 +743,35 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   <!-- Service tabs -->
   <div class="service-tabs" id="service-tabs"></div>
 
+  <!-- Service Health Narrative -->
+  <div class="card" style="margin-bottom:20px" id="narrative-card">
+    <div class="card-header">
+      <div class="card-title">&#129302; Service Health Analysis</div>
+      <div class="card-subtitle">AI-generated from CPU profiling, exceptions &amp; regression data</div>
+      <button class="narrative-btn" id="narrative-btn" onclick="generateNarrative()">Analyze</button>
+    </div>
+    <div id="narrative-body">
+      <div class="empty" style="padding:20px;font-size:12px">Click <strong>Analyze</strong> to generate an AI health summary for this service.</div>
+    </div>
+  </div>
+
   <!-- AlwaysOn flamegraph + top functions -->
   <div class="grid" style="margin-bottom:20px">
     <div class="card full-width" id="icicle-card">
       <div class="card-header">
-        <div class="card-title">&#128293; AlwaysOn CPU Flamegraph</div>
+        <div class="card-title" id="icicle-title">&#128293; AlwaysOn CPU Flamegraph</div>
         <div class="card-subtitle" id="icicle-subtitle">Grouped by package category</div>
+        <div class="fg-mode-tabs">
+          <button class="fg-mode-btn active" id="fg-btn-cpu"    onclick="setFlamegraphMode('cpu')">CPU</button>
+          <button class="fg-mode-btn"        id="fg-btn-memory" onclick="setFlamegraphMode('memory')">Memory</button>
+          <button class="fg-mode-btn"        id="fg-btn-diff"   onclick="setFlamegraphMode('diff')">Diff</button>
+        </div>
       </div>
       <div class="card-body">
         <div id="icicle-wrap"><div class="empty loading">Loading flamegraph…</div></div>
         <div class="legend" id="icicle-legend"></div>
+        <div id="memory-wrap" style="display:none"></div>
+        <div id="diff-wrap"   style="display:none"></div>
       </div>
     </div>
     <div class="card" id="topfn-card">
@@ -821,7 +908,7 @@ function shortFile(file) {
 let state = {
   services: [],
   activeService: null,
-  flamegraphs: {},      // service → {frames}
+  flamegraphs: {},      // service → [frames]
   profilingActive: new Set(), // services that ARE sending AlwaysOn records (even if all idle)
   snapshots: [],        // [{service, trace_id, record_count, arrived_at}]
   hotspots: {},         // service → {methods[], total_samples, total_traces}
@@ -832,6 +919,10 @@ let state = {
   environment: '',
   totalFrames: {},      // service → frame_count
   timeRange: { mode: 'live', customSince: null, customUntil: null },
+  narratives: {},       // service → {severity, score, summary, findings}
+  memoryFrames: {},     // service → [frames]
+  flameDiff: {},        // service → [{function, file, before_pct, after_pct, delta_pct}]
+  flamegraphMode: 'cpu', // 'cpu' | 'memory' | 'diff'
 };
 
 // Frame metadata for the fix generator, keyed by source-panel id.
@@ -865,6 +956,16 @@ async function fetchExceptionDetail(service, traceId) {
 
 async function fetchFlamegraph(service) {
   const r = await fetch(`/api/profiling/flamegraph/${encodeURIComponent(service)}${getTimeParams()}`);
+  return r.json();
+}
+
+async function fetchMemory(service) {
+  const r = await fetch(`/api/profiling/memory/${encodeURIComponent(service)}${getTimeParams()}`);
+  return r.json();
+}
+
+async function fetchDiff(service) {
+  const r = await fetch(`/api/profiling/diff/${encodeURIComponent(service)}`);
   return r.json();
 }
 
@@ -1900,13 +2001,17 @@ async function setService(svc) {
   renderTabs(state.services);
   refreshUI();
   try {
-    const [fg, hs, excData] = await Promise.all([
+    const [fg, hs, excData, memData, diffData] = await Promise.all([
       fetchFlamegraph(svc),
       fetchHotspots(svc),
       fetchExceptions(svc),
+      fetchMemory(svc),
+      fetchDiff(svc),
     ]);
     state.flamegraphs[svc] = fg.frames || [];
     state.hotspots[svc] = hs;
+    state.memoryFrames[svc] = memData.frames || [];
+    state.flameDiff[svc] = diffData.diff || [];
     // Merge service-specific exceptions into global list (keyed by service+trace_id)
     const excMap = new Map(state.exceptions.map(e => [e.service + e.trace_id, e]));
     for (const e of (excData.exceptions || [])) excMap.set(e.service + e.trace_id, e);
@@ -1941,7 +2046,14 @@ function renderStats(snapshots) {
 function refreshUI() {
   const frames = state.flamegraphs[state.activeService] || [];
   const filtered = filteredSnapshots();
-  buildIcicle(frames, state.activeService);
+  // Flamegraph panel: only rebuild the active mode
+  if (state.flamegraphMode === 'cpu') {
+    buildIcicle(frames, state.activeService);
+  } else if (state.flamegraphMode === 'memory') {
+    renderMemoryView(state.memoryFrames[state.activeService] || []);
+  } else if (state.flamegraphMode === 'diff') {
+    renderDiffView(state.flameDiff[state.activeService] || []);
+  }
   renderTopFunctions(frames, state.activeService);
   renderHotspots(state.hotspots[state.activeService], state.activeService);
   renderSnapshotSummary(filtered, state.activeService);
@@ -1949,6 +2061,7 @@ function refreshUI() {
   renderStats(filtered);
   renderTabs(state.services, filtered);
   renderExceptionList(state.exceptions, state.activeService);
+  renderNarrative(state.activeService);
 }
 
 // ── Data refresh loop ──────────────────────────────────────────────────────
@@ -1979,14 +2092,18 @@ async function refresh() {
       state.activeService = allSvcs[0] || null;
     }
 
-    // Fetch flamegraph + hotspots for active service in parallel
+    // Fetch flamegraph, hotspots, memory, diff for active service in parallel
     if (state.activeService) {
-      const [fg, hs] = await Promise.all([
+      const [fg, hs, memData, diffData] = await Promise.all([
         fetchFlamegraph(state.activeService),
         fetchHotspots(state.activeService),
+        fetchMemory(state.activeService),
+        fetchDiff(state.activeService),
       ]);
       state.flamegraphs[state.activeService] = fg.frames || [];
       state.hotspots[state.activeService] = hs;
+      state.memoryFrames[state.activeService] = memData.frames || [];
+      state.flameDiff[state.activeService] = diffData.diff || [];
     }
 
     refreshUI();
@@ -2145,6 +2262,175 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ── Flamegraph mode switching (CPU / Memory / Diff) ─────────────────────────
+
+function setFlamegraphMode(mode) {
+  state.flamegraphMode = mode;
+  document.querySelectorAll('.fg-mode-btn').forEach(b =>
+    b.classList.toggle('active', b.id === 'fg-btn-' + mode));
+
+  const icicleWrap = document.getElementById('icicle-wrap');
+  const legend     = document.getElementById('icicle-legend');
+  const memWrap    = document.getElementById('memory-wrap');
+  const diffWrap   = document.getElementById('diff-wrap');
+  const title      = document.getElementById('icicle-title');
+
+  icicleWrap.style.display = mode === 'cpu'    ? '' : 'none';
+  legend.style.display     = mode === 'cpu'    ? '' : 'none';
+  memWrap.style.display    = mode === 'memory' ? '' : 'none';
+  diffWrap.style.display   = mode === 'diff'   ? '' : 'none';
+
+  if (mode === 'cpu') {
+    title.innerHTML = '&#128293; AlwaysOn CPU Flamegraph';
+    buildIcicle(state.flamegraphs[state.activeService] || [], state.activeService);
+  } else if (mode === 'memory') {
+    title.textContent = 'Memory Allocation Profile';
+    renderMemoryView(state.memoryFrames[state.activeService] || []);
+  } else {
+    title.textContent = 'CPU Regression Diff (vs ~15 min ago)';
+    renderDiffView(state.flameDiff[state.activeService] || []);
+  }
+}
+
+function renderMemoryView(frames) {
+  const wrap = document.getElementById('memory-wrap');
+  if (!frames || frames.length === 0) {
+    wrap.innerHTML = '<div class="empty" style="padding:24px">No memory allocation profiling data.<br><span style="font-size:11px;color:var(--muted)">Enable with <code>SPLUNK_PROFILER_MEMORY_ENABLED=true</code></span></div>';
+    return;
+  }
+  const totalSamples = frames.reduce((s, f) => s + f.samples, 0);
+  const rows = frames.slice(0, 15).map(f => {
+    const cat   = categorize(f.file);
+    const color = PKG_COLORS[cat] || PKG_COLORS.unknown;
+    const pct   = f.pct_cpu ?? (totalSamples ? (f.samples / totalSamples * 100).toFixed(1) : 0);
+    return `<tr>
+      <td><span class="fn-pkg" style="background:${color}22;color:${color}">${cat}</span></td>
+      <td>
+        <div class="fn-name">${esc(f.function)}()</div>
+        <div class="fn-file" title="${esc(f.file)}">${esc(shortFile(f.file))}</div>
+      </td>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="bar-wrap"><div class="bar-bg"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div></div>
+          <span class="pct-label">${pct}%</span>
+        </div>
+      </td>
+      <td style="text-align:right;font-size:11px;color:var(--muted)">${f.samples}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class="fn-table">
+    <thead><tr>
+      <th style="width:70px">Category</th>
+      <th>Function (allocation site)</th>
+      <th style="width:160px">Alloc Share</th>
+      <th style="width:60px;text-align:right">Samples</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderDiffView(diff) {
+  const wrap = document.getElementById('diff-wrap');
+  if (!diff || diff.length === 0) {
+    wrap.innerHTML = '<div class="empty" style="padding:24px">No regression data available yet.<br><span style="font-size:11px;color:var(--muted)">Need ~15 min of profiling history. Functions with |&Delta;| &ge; 2% are shown.</span></div>';
+    return;
+  }
+  const rows = diff.map(d => {
+    const isUp       = d.delta_pct > 0;
+    const deltaClass = isUp ? 'up' : 'down';
+    const deltaSign  = isUp ? '+' : '';
+    const barPct     = Math.min(Math.abs(d.delta_pct) * 4, 100);
+    const barColor   = isUp ? '#f87171' : '#4ade80';
+    return `<tr>
+      <td>
+        <div class="diff-fn">${esc(d.function)}()</div>
+        <div class="diff-file">${esc(shortPath(d.file || ''))}</div>
+      </td>
+      <td class="diff-pct" style="color:var(--muted)">${d.before_pct}%</td>
+      <td class="diff-pct">${d.after_pct}%</td>
+      <td class="diff-delta ${deltaClass}">${deltaSign}${d.delta_pct}%</td>
+      <td>
+        <div class="diff-bar-wrap">
+          <div class="diff-bar-bg">
+            <div class="diff-bar-fill" style="width:${barPct}%;background:${barColor}"></div>
+          </div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class="diff-table">
+    <thead><tr>
+      <th>Function</th>
+      <th style="width:60px">Before</th>
+      <th style="width:55px">Now</th>
+      <th style="width:65px">Change</th>
+      <th style="width:90px"></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ── Service Health Narrative ────────────────────────────────────────────────
+
+async function generateNarrative() {
+  const svc = state.activeService;
+  if (!svc) return;
+
+  const btn  = document.getElementById('narrative-btn');
+  const body = document.getElementById('narrative-body');
+  if (btn)  { btn.disabled = true; btn.textContent = 'Analyzing\u2026'; }
+  if (body) body.innerHTML = '<div class="empty loading" style="padding:20px">Calling AI \u2014 this may take 10\u201320 seconds\u2026</div>';
+
+  try {
+    const resp = await fetch(`/api/profiling/narrative/${encodeURIComponent(svc)}`, { method: 'POST' });
+    const data = await resp.json();
+    state.narratives[svc] = data;
+    renderNarrative(svc);
+  } catch (err) {
+    if (body) body.innerHTML = `<div class="empty" style="color:var(--warn);padding:20px">Error: ${esc(String(err))}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = state.narratives[svc] && !state.narratives[svc].error ? '\u21ba Re-analyze' : 'Analyze'; }
+  }
+}
+
+function renderNarrative(svc) {
+  const body = document.getElementById('narrative-body');
+  if (!body) return;
+  const n = state.narratives[svc];
+  if (!n) {
+    body.innerHTML = '<div class="empty" style="padding:20px;font-size:12px">Click <strong>Analyze</strong> to generate an AI health summary for this service.</div>';
+    return;
+  }
+  if (n.error) {
+    body.innerHTML = `<div class="empty" style="color:var(--warn);padding:20px">${esc(n.error)}</div>`;
+    const btn = document.getElementById('narrative-btn');
+    if (btn) btn.textContent = 'Analyze';
+    return;
+  }
+
+  const sev   = n.severity || 'healthy';
+  const score = n.score ?? '\u2014';
+  const findingsHtml = (n.findings || []).map(f => `
+    <div class="finding">
+      <div class="finding-dot ${f.severity || 'info'}"></div>
+      <div>
+        <div class="finding-title">${esc(f.title || '')}</div>
+        <div class="finding-detail">${esc(f.detail || '')}</div>
+      </div>
+    </div>`).join('');
+
+  body.innerHTML = `
+    <div class="narrative-bar">
+      <span class="narrative-sev ${sev}">${sev.toUpperCase()}</span>
+      <span class="narrative-score ${sev}" title="Health score (0=critical, 100=healthy)">${score}</span>
+      <div class="narrative-summary">${esc(n.summary || '')}</div>
+    </div>
+    ${findingsHtml ? `<div class="narrative-findings">${findingsHtml}</div>` : ''}`;
+
+  const btn = document.getElementById('narrative-btn');
+  if (btn) btn.textContent = '\u21ba Re-analyze';
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
