@@ -49,6 +49,42 @@ services:
     logging: *logging
 
   # ============================================================
+  # FINE-TUNED LOCAL LLM (optional — profile: local-llm)
+  # Bundles the o11y-agent-3b fine-tuned model in an Ollama container.
+  # Use instead of Bedrock when deploying in air-gapped or cost-sensitive envs.
+  #
+  # Build once:
+  #   docker compose --profile local-llm build ollama
+  # Run full stack with local LLM:
+  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-3b docker compose --profile local-llm up -d
+  # ============================================================
+  ollama:
+    profiles: ["local-llm"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ollama
+      args:
+        GGUF_PATH: training/output/o11y-agent-3b-q4km.gguf
+        MODEL_NAME: o11y-agent-3b
+    image: o11y-agent-ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging: *logging
+
+  # ============================================================
   # AUTONOMOUS O11Y AGENT
   # Streaming mode: OTLP receiver on :4318 accepts a secondary
   # fan-out from the gateway collector for real-time detection
@@ -692,4 +728,6 @@ volumes:
   agent-state:
     driver: local
   supervisor-data:
+    driver: local
+  ollama-data:
     driver: local
