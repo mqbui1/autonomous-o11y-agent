@@ -1,0 +1,31 @@
+# Builds an Ollama image with the fine-tuned o11y-agent-3b model baked in.
+#
+# Build from repo root:
+#   docker build -f deploy/Dockerfile.ollama \
+#     --build-arg GGUF_PATH=training/output/o11y-agent-3b-q4km.gguf \
+#     -t o11y-agent-ollama:latest .
+#
+# The model is pre-loaded at build time so startup is instant for customers.
+# No internet access required at runtime.
+
+FROM ollama/ollama:latest
+
+ARG GGUF_PATH=training/output/o11y-agent-3b-q4km.gguf
+ARG MODEL_NAME=o11y-agent-3b
+
+COPY ${GGUF_PATH} /models/${MODEL_NAME}.gguf
+
+RUN printf 'FROM /models/%s.gguf\nPARAMETER num_ctx 8192\nPARAMETER temperature 0.1\nPARAMETER top_p 0.9\nPARAMETER repeat_penalty 1.1\n' "${MODEL_NAME}" > /models/Modelfile
+
+# Pre-load the model so first inference is instant (no cold-start delay)
+RUN ollama serve & \
+    sleep 8 && \
+    ollama create ${MODEL_NAME} -f /models/Modelfile && \
+    pkill ollama || true
+
+ENV OLLAMA_MODEL=${MODEL_NAME}
+
+EXPOSE 11434
+
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]
