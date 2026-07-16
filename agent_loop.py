@@ -129,6 +129,11 @@ def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
     if fn is None:
         return f"Unknown tool: {name}"
     try:
+        import inspect
+        if inputs:
+            sig = inspect.signature(fn)
+            valid = set(sig.parameters)
+            inputs = {k: v for k, v in inputs.items() if k in valid}
         return fn(**inputs) if inputs else fn()
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
