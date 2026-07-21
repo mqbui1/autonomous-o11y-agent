@@ -234,18 +234,19 @@ class StreamingPipeline:
                     # Route profiling records to the appropriate local store
                     if record_attrs.get("com.splunk.sourcetype") == "otel.profiling":
                         data_format = record_attrs.get("profiling.data.format", "")
+                        data_type = record_attrs.get("profiling.data.type", "cpu")
                         instr_source = record_attrs.get("profiling.instrumentation.source", "continuous")
                         environment = resource_attrs.get("deployment.environment", "unknown")
                         if instr_source == "snapshot":
-                            # Snapshot (call-graph) profiling: index by trace_id
+                            # Snapshot profiling: pprof call-graph OR json-alloc-v1 heap data
                             snapshot_store.observe(
                                 service=service,
                                 body=body,
                                 data_format=data_format,
+                                data_type=data_type,
                             )
                         else:
                             # AlwaysOn (continuous) profiling: index by service+env
-                            data_type = record_attrs.get("profiling.data.type", "cpu")
                             profiling_store.observe(
                                 service=service,
                                 environment=environment,

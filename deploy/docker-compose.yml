@@ -404,6 +404,8 @@ services:
       - FIREPIT_PORT=8080
       - TELEMETRY_DOCS_HOST=localhost
       - TELEMETRY_DOCS_PORT=8080
+      - OPAMP_SERVER_HOST=localhost
+      - OPAMP_SERVER_UI_PORT=4321
     depends_on:
       frontend:
         condition: service_started
@@ -438,6 +440,26 @@ services:
       - SPLUNK_RUM_TOKEN
     depends_on:
       - frontend-proxy
+    logging: *logging
+
+  # ── Browser simulator ── started by training_pipeline.py at Phase 3 ─────────
+  # Generates real Playwright browser sessions via rum-proxy so the Splunk RUM JS
+  # snippet fires and sends beacons to Splunk Observability Cloud.
+  # Profile 'rum' keeps it from auto-starting with `docker compose up -d`.
+  browser-sim:
+    build:
+      context: ./browser-sim
+      dockerfile: Dockerfile
+    container_name: browser-sim
+    restart: unless-stopped
+    profiles: ["rum"]
+    environment:
+      - DEMO_URL=http://rum-proxy:80
+      - SIM_INTERVAL=45
+      - PAGE_WAIT_MIN=2000
+      - PAGE_WAIT_MAX=5000
+    depends_on:
+      - rum-proxy
     logging: *logging
 
   image-provider:

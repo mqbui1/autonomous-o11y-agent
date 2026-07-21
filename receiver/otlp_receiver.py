@@ -195,6 +195,28 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
         except Exception as exc:
             return Response(json.dumps({'error': str(exc)}), status=500, mimetype="application/json")
 
+    @app.get("/api/profiling/memory-snapshot/<service>/<trace_id>")
+    def memory_snapshot(service, trace_id):
+        """Return trace-correlated heap allocation frames for a specific trace."""
+        try:
+            import sys as _sys, os as _os
+            agent_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if agent_root not in _sys.path:
+                _sys.path.insert(0, agent_root)
+            from streaming import snapshot_store as ss
+            frames = ss.get_allocations(service, trace_id)
+            return Response(
+                json.dumps({
+                    "service":   service,
+                    "trace_id":  trace_id,
+                    "found":     bool(frames),
+                    "frames":    frames,
+                }),
+                status=200, mimetype="application/json",
+            )
+        except Exception as exc:
+            return Response(json.dumps({"error": str(exc)}), status=500, mimetype="application/json")
+
     @app.get("/api/profiling/snapshot")
     def snapshot_debug():
         try:
@@ -346,7 +368,8 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
             limit = int(request.args.get("limit", 200) or 200)
             data  = es.list_recent(service=svc, limit=limit)
             for item in data:
-                item["has_snapshot"] = ss.has_data(item["service"], item["trace_id"])
+                item["has_snapshot"]    = ss.has_data(item["service"], item["trace_id"])
+                item["has_alloc_data"]  = ss.has_allocation_data(item["service"], item["trace_id"])
             return Response(json.dumps({"exceptions": data, "count": len(data)}),
                             status=200, mimetype="application/json")
         except Exception as exc:
@@ -411,6 +434,8 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
         if not env:
             return Response(json.dumps({"runs": []}), status=200, mimetype="application/json")
         state = load_state(env)
+        limit = request.args.get("limit", default=20, type=int)
+        history = state.runs if limit <= 0 else state.runs[-limit:]
         runs = [
             {
                 "run_id": r.run_id,
@@ -422,7 +447,7 @@ def create_app(pipeline: "StreamingPipeline", environment: str = "") -> Flask:
                 "critical_issues": r.critical_issues[:3],
                 "top_findings": r.top_findings[:3],
             }
-            for r in reversed(state.runs[-20:])
+            for r in reversed(history)
         ]
         return Response(json.dumps({"runs": runs, "environment": env}), status=200, mimetype="application/json")
 

@@ -35,6 +35,23 @@ receivers:
             - targets: ["0.0.0.0:8888"]
 
 processors:
+  redaction/pii_ipv4:
+    allow_all_keys: true
+    blocked_values:
+      - '\b10\.\d+\.\d+\.\d+\b'
+      - '\b172\.(1[6-9]|2\d|3[01])\.\d+\.\d+\b'
+      - '\b192\.168\.\d+\.\d+\b'
+    blocked_key_patterns:
+          - "^upstream_address$"
+          - "^peer\\.address$"
+          - "^net\\.sock\\.peer\\.addr$"
+    summary: debug
+  filter/drop_flagd_stream:
+    spans:
+      exclude:
+        match_type: strict
+        span_names:
+          - "/flagd.evaluation.v2.Service/EventStream"
   batch:
     timeout: 5s
     send_batch_size: 1000
@@ -130,7 +147,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span]
+      processors: [memory_limiter, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span, redaction/pii_ipv4]
       exporters: [otlphttp/traces, signalfx, otlphttp/agent]
 
     metrics:

@@ -1,14 +1,21 @@
 # Payment — Node.js v22 with Splunk OTel distro for AlwaysOn Profiling
 
-# ── Stage 1: install @splunk/otel ────────────────────────────────────────────
+# ── Stage 1: install @splunk/otel + stage heap profiling file ─────────────────
 FROM node:22-alpine AS builder
 WORKDIR /install
 RUN npm install @splunk/otel
+RUN mkdir -p /opt/heap_profiling
+COPY profiling/heap_snapshot_processor.js /opt/heap_profiling/heap_snapshot_processor.js
 
 # ── Stage 2: final image ──────────────────────────────────────────────────────
 FROM ghcr.io/open-telemetry/demo:latest-payment
 
 COPY --from=builder /install/node_modules /usr/src/app/node_modules
 
-# Payment has no pre-existing --require flag, so prepend @splunk/otel/instrument.
-CMD ["--require=@splunk/otel/instrument", "index.js"]
+# ── Trace-correlated heap allocation profiling ───────────────────────────────
+COPY --from=builder /opt/heap_profiling /opt/heap_profiling
+ENV HEAP_SNAPSHOT_ENABLED=true
+
+# heap_snapshot_processor.js must be required BEFORE @splunk/otel/instrument
+# so it can intercept ProxyTracerProvider.setDelegate.
+CMD ["--require=/opt/heap_profiling/heap_snapshot_processor.js", "--require=@splunk/otel/instrument", "index.js"]

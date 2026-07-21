@@ -22,7 +22,7 @@ from ._runner import get_config
 logger = logging.getLogger(__name__)
 
 _RUM_APP_DIMENSION = "app"
-_RUM_ENV_DIMENSION = "environment"
+_RUM_ENV_DIMENSION = "sf_environment"
 
 
 def _api(path: str, payload: dict = None, method: str = "GET") -> dict:
@@ -44,19 +44,22 @@ def _signalflow(program: str, hours: int = 1) -> dict:
     cfg = get_config()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - hours * 3600 * 1000
-    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute"
-    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "application/json"}
-    payload = {
-        "program": program,
+    # start/stop/resolution/immediate are query params, NOT JSON body fields —
+    # the execute endpoint's body is the raw program text (text/plain).
+    import urllib.parse
+    qs = urllib.parse.urlencode({
         "start": start_ms,
         "stop": now_ms,
         "resolution": 60000,
-        "immediate": True,
-    }
+        "immediate": "true",
+    })
+    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute?{qs}"
+    headers = {"X-SF-TOKEN": cfg.token, "Content-Type": "text/plain"}
     req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        url, data=program.encode(), headers=headers, method="POST"
     )
-    results: dict[str, list] = {}
+    series: dict[str, list] = {}
+    meta: dict[str, dict] = {}
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             current_event_type = None
@@ -80,11 +83,15 @@ def _signalflow(program: str, hours: int = 1) -> dict:
                             tsid = point.get("tsId", "")
                             val = point.get("value")
                             if tsid and val is not None:
-                                results.setdefault(tsid, []).append(float(val))
+                                series.setdefault(tsid, []).append(float(val))
+                    elif etype == "metadata":
+                        tsid = msg.get("tsId", "")
+                        if tsid:
+                            meta[tsid] = msg.get("properties", {})
                     data_lines = []
     except Exception as exc:
         logger.warning("SignalFlow query failed: %s", exc)
-    return results
+    return {"series": series, "meta": meta}
 
 
 def list_rum_apps() -> str:
@@ -98,7 +105,7 @@ def list_rum_apps() -> str:
     """
     try:
         # Query the RUM metric catalog for known app dimension values
-        result = _api("/v2/metrictimeseries?query=sf_metric:rum.page.views.count&limit=100", method="GET")
+        result = _api("/v2/metrictimeseries?query=sf_metric:rum.page_view.count&limit=100", method="GET")
         apps: dict[str, dict] = {}
         for mts in result.get("results", []):
             dims = mts.get("dimensions", {})
@@ -142,27 +149,24 @@ def get_rum_metrics(app_name: str, hours: int = 24) -> str:
     try:
         filter_clause = f'filter("app", "{app_name}")'
 
+        # rum.webvitals_*.p75 metrics are pre-aggregated per-timeseries (split by
+        # browser/OS/etc.) — .mean() collapses those dimensions to one overall figure.
+        # There is no Splunk RUM "time to interactive" metric; INP has replaced FID
+        # in current Core Web Vitals, so there's no rum.fid equivalent either.
         programs = {
-            "sessions": f'data("rum.page.views.count", {filter_clause}).sum(over="{hours}h").publish()',
-            "errors":   f'data("rum.js.errors.count", {filter_clause}).sum(over="{hours}h").publish()',
-            "lcp_p75":  f'data("rum.lcp", {filter_clause}).percentile(pct=75).publish()',
-            "fid_p75":  f'data("rum.fid", {filter_clause}).percentile(pct=75).publish()',
-            "cls_p75":  f'data("rum.cls", {filter_clause}).percentile(pct=75).publish()',
-            "tti_p75":  f'data("rum.time_to_interactive", {filter_clause}).percentile(pct=75).publish()',
+            "sessions": f'data("rum.page_view.count", {filter_clause}).sum(over="{hours}h").sum().publish()',
+            "errors":   f'data("rum.client_error.count", {filter_clause}).sum(over="{hours}h").sum().publish()',
+            "lcp_p75":  f'data("rum.webvitals_lcp.time.ns.p75", {filter_clause}).mean().publish()',
+            "inp_p75":  f'data("rum.webvitals_inp.time.ns.p75", {filter_clause}).mean().publish()',
+            "cls_p75":  f'data("rum.webvitals_cls.score.p75", {filter_clause}).mean().publish()',
         }
 
         metrics: dict[str, float | None] = {}
         for key, prog in programs.items():
             try:
-                streams = _signalflow(prog, hours=hours)
-                if streams:
-                    vals = list(streams.values())
-                    if vals and vals[0]:
-                        metrics[key] = vals[0][-1]
-                    else:
-                        metrics[key] = None
-                else:
-                    metrics[key] = None
+                series = _signalflow(prog, hours=hours).get("series", {})
+                vals = list(series.values())
+                metrics[key] = vals[0][-1] if vals and vals[0] else None
             except Exception:
                 metrics[key] = None
 
@@ -170,14 +174,14 @@ def get_rum_metrics(app_name: str, hours: int = 24) -> str:
         errors = metrics.get("errors") or 0
         error_rate = (errors / sessions * 100) if sessions > 0 else 0.0
 
-        lcp = metrics.get("lcp_p75")
-        fid = metrics.get("fid_p75")
+        # rum.webvitals_lcp/inp.time.ns.p75 are reported in nanoseconds — convert to ms.
+        lcp = metrics.get("lcp_p75") / 1e6 if metrics.get("lcp_p75") is not None else None
+        inp = metrics.get("inp_p75") / 1e6 if metrics.get("inp_p75") is not None else None
         cls_val = metrics.get("cls_p75")
-        tti = metrics.get("tti_p75")
 
-        # Core Web Vitals scoring (Google thresholds)
+        # Core Web Vitals scoring (Google thresholds; INP replaces FID)
         def lcp_grade(v): return "good" if v and v < 2500 else ("needs-improvement" if v and v < 4000 else "poor")
-        def fid_grade(v): return "good" if v and v < 100 else ("needs-improvement" if v and v < 300 else "poor")
+        def inp_grade(v): return "good" if v and v < 200 else ("needs-improvement" if v and v < 500 else "poor")
         def cls_grade(v): return "good" if v and v < 0.1 else ("needs-improvement" if v and v < 0.25 else "poor")
 
         health = "healthy"
@@ -201,17 +205,16 @@ def get_rum_metrics(app_name: str, hours: int = 24) -> str:
             "core_web_vitals": {
                 "lcp_p75_ms":  round(lcp, 0) if lcp else None,
                 "lcp_grade":   lcp_grade(lcp),
-                "fid_p75_ms":  round(fid, 0) if fid else None,
-                "fid_grade":   fid_grade(fid),
+                "inp_p75_ms":  round(inp, 0) if inp else None,
+                "inp_grade":   inp_grade(inp),
                 "cls_p75":     round(cls_val, 3) if cls_val else None,
                 "cls_grade":   cls_grade(cls_val),
-                "tti_p75_ms":  round(tti, 0) if tti else None,
             },
             "health": health,
             "issues": issues,
             "message": (
                 f"{app_name}: {int(sessions)} sessions, {error_rate:.1f}% error rate "
-                f"in last {hours}h. LCP={lcp_grade(lcp)}, FID={fid_grade(fid)}, CLS={cls_grade(cls_val)}."
+                f"in last {hours}h. LCP={lcp_grade(lcp)}, INP={inp_grade(inp)}, CLS={cls_grade(cls_val)}."
             ),
         }, indent=2)
 
@@ -232,15 +235,19 @@ def get_rum_errors(app_name: str, hours: int = 6) -> str:
     try:
         filter_clause = f'filter("app", "{app_name}")'
         prog = (
-            f'data("rum.js.errors.count", {filter_clause})'
-            f'.sum(by=["error.type", "error.message"]).top(count=10).publish()'
+            f'data("rum.client_error.count", {filter_clause})'
+            f'.sum(by=["errorId", "sf_operation"]).top(count=10).publish()'
         )
-        streams = _signalflow(prog, hours=hours)
+        result = _signalflow(prog, hours=hours)
+        series = result.get("series", {})
+        meta = result.get("meta", {})
 
         errors = []
-        for stream_id, vals in streams.items():
+        for tsid, vals in series.items():
             if vals:
-                errors.append({"stream_id": stream_id, "count": sum(v for v in vals if v)})
+                props = meta.get(tsid, {})
+                label = f"{props.get('sf_operation', 'unknown')} (errorId={props.get('errorId', tsid)})"
+                errors.append({"error": label, "count": sum(v for v in vals if v)})
 
         errors.sort(key=lambda x: x["count"], reverse=True)
         total = sum(e["count"] for e in errors)

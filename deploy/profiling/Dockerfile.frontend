@@ -49,4 +49,13 @@ USER nextjs
 ENV PORT=8080
 EXPOSE ${PORT}
 
+# ── Trace-correlated heap allocation profiling ───────────────────────────────
+# heap_snapshot_processor.js must be required before @splunk/otel/instrument.
+# The build context is opentelemetry-demo root; copy the file from there.
+# Before building, run: cp deploy/profiling/heap_snapshot_processor.js \
+#   /Users/mbui/Documents/opentelemetry-demo/heap_snapshot_processor.js
+COPY heap_snapshot_processor.js /opt/heap_profiling/heap_snapshot_processor.js
+ENV HEAP_SNAPSHOT_ENABLED=true
+ENV NODE_OPTIONS="--enable-source-maps --require /opt/heap_profiling/heap_snapshot_processor.js"
+
 CMD ["node", "--require=@splunk/otel/instrument", "server.js"]

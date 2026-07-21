@@ -1052,6 +1052,11 @@ async function fetchCallgraph(service, traceId) {
   return r.json();
 }
 
+async function fetchMemorySnapshot(service, traceId) {
+  const r = await fetch(`/api/profiling/memory-snapshot/${encodeURIComponent(service)}/${encodeURIComponent(traceId)}`);
+  return r.json();
+}
+
 // ── Tooltip ───────────────────────────────────────────────────────────────
 
 const tt = document.getElementById('tooltip');
@@ -1670,8 +1675,19 @@ async function selectTrace(service, traceId) {
   panel.innerHTML = '<div class="no-frames" style="color:var(--muted);font-style:italic">Loading frames…</div>';
 
   try {
-    const data = await fetchCallgraph(service, traceId);
+    const [data, allocData] = await Promise.all([
+      fetchCallgraph(service, traceId),
+      fetchMemorySnapshot(service, traceId).catch(() => ({ found: false, frames: [] })),
+    ]);
+
+    const hasAlloc = allocData && allocData.found && allocData.frames && allocData.frames.length > 0;
+
     if (!data.found || !data.slowest_methods || data.slowest_methods.length === 0) {
+      if (hasAlloc) {
+        panel.innerHTML = renderTraceHeader(service, traceId, null, hasAlloc) +
+          renderAllocTab(allocData.frames);
+        return;
+      }
       panel.innerHTML = `<div class="no-frames">No frames found for this trace.<br><small style="color:var(--muted)">The trace may have expired from the 30-minute window.</small></div>`;
       return;
     }
@@ -1679,13 +1695,13 @@ async function selectTrace(service, traceId) {
     const color = svcColor(service);
     const totalMs = data.slowest_methods.reduce((s, m) => s + m.self_time_ms, 0);
 
-    panel.innerHTML = `
-      <div style="padding:8px 10px 12px;border-bottom:1px solid var(--border);margin-bottom:8px;display:flex;align-items:center;gap:10px">
-        <div style="font-family:monospace;font-size:11px;color:var(--muted)">trace</div>
-        <div style="font-family:monospace;font-size:11px;color:${color}">${traceId}</div>
-        <div style="margin-left:auto;font-size:11px;color:var(--muted)">${data.slowest_methods.length} frame${data.slowest_methods.length > 1 ? 's' : ''} · ~${totalMs.toFixed(0)}ms total</div>
-      </div>
-      ${data.slowest_methods.map((m, i) => {
+    panel.innerHTML = renderTraceHeader(service, traceId, totalMs, hasAlloc) +
+      (hasAlloc ? `<div style="display:flex;gap:2px;padding:0 4px 8px">
+        <button class="fg-mode-btn active" id="snap-tab-cpu" onclick="showSnapTab('cpu','${esc(service)}','${esc(traceId)}')">CPU Call-Graph</button>
+        <button class="fg-mode-btn" id="snap-tab-heap" onclick="showSnapTab('heap','${esc(service)}','${esc(traceId)}')">Heap Allocs</button>
+      </div>` : '') +
+      `<div id="snap-cpu-panel">` +
+      data.slowest_methods.map((m, i) => {
         const barW = totalMs > 0 ? (m.self_time_ms / totalMs * 100) : (100 / data.slowest_methods.length);
         const cat = categorize(m.file);
         const catColor = PKG_COLORS[cat] || PKG_COLORS.unknown;
@@ -1731,10 +1747,77 @@ async function selectTrace(service, traceId) {
           </div>`;
         })()}
         <div class="source-panel hidden" id="src-${service}-${i}"></div>`;
-      }).join('')}`;
+      }).join('') +
+      `</div>` +
+      (hasAlloc ? `<div id="snap-heap-panel" style="display:none">${renderAllocTable(allocData.frames)}</div>` : '');
   } catch (err) {
     panel.innerHTML = `<div class="no-frames">Error loading frames: ${esc(String(err))}</div>`;
   }
+}
+
+function renderTraceHeader(service, traceId, totalMs, hasAlloc) {
+  const color   = svcColor(service);
+  const msLabel = totalMs != null ? ` · ~${totalMs.toFixed(0)}ms total` : '';
+  const allocBadge = hasAlloc
+    ? `<span style="font-size:10px;color:var(--accent2);border:1px solid rgba(0,196,167,0.35);border-radius:3px;padding:1px 5px;white-space:nowrap">heap data</span>`
+    : '';
+  return `<div style="padding:8px 10px 12px;border-bottom:1px solid var(--border);margin-bottom:8px;display:flex;align-items:center;gap:10px">
+    <div style="font-family:monospace;font-size:11px;color:var(--muted)">trace</div>
+    <div style="font-family:monospace;font-size:11px;color:${color}">${traceId}</div>
+    ${allocBadge}
+    <div style="margin-left:auto;font-size:11px;color:var(--muted)">${msLabel}</div>
+  </div>`;
+}
+
+function renderAllocTab(frames) {
+  return `<div style="padding:4px 4px 0">
+    ${renderAllocTable(frames)}
+  </div>`;
+}
+
+function renderAllocTable(frames) {
+  if (!frames || frames.length === 0) {
+    return '<div class="empty" style="padding:16px">No heap allocation data for this trace.</div>';
+  }
+  const maxSize = frames[0].size_bytes || 1;
+  const rows = frames.slice(0, 20).map(f => {
+    const cat   = categorize(f.file || '');
+    const color = PKG_COLORS[cat] || PKG_COLORS.unknown;
+    const kb    = (f.size_bytes / 1024).toFixed(1);
+    const barW  = Math.min(f.size_bytes / maxSize * 100, 100).toFixed(1);
+    return `<tr>
+      <td><span class="fn-pkg" style="background:${color}22;color:${color}">${cat}</span></td>
+      <td>
+        <div class="fn-name">${esc(f.function || 'unknown')}()</div>
+        <div class="fn-file" title="${esc(f.file || '')}">${esc(shortPath(f.file || ''))}</div>
+      </td>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="bar-wrap"><div class="bar-bg"><div class="bar-fill" style="width:${barW}%;background:${color}"></div></div></div>
+          <span class="pct-label">${f.pct ?? 0}%</span>
+        </div>
+      </td>
+      <td style="text-align:right;font-size:11px;color:var(--muted);white-space:nowrap">${kb} KB</td>
+    </tr>`;
+  }).join('');
+  return `<table class="fn-table">
+    <thead><tr>
+      <th style="width:70px">Category</th>
+      <th>Allocation Site</th>
+      <th style="width:160px">Heap Share</th>
+      <th style="width:70px;text-align:right">Bytes</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function showSnapTab(tab, service, traceId) {
+  document.getElementById('snap-tab-cpu')  ?.classList.toggle('active', tab === 'cpu');
+  document.getElementById('snap-tab-heap') ?.classList.toggle('active', tab === 'heap');
+  const cpuPanel  = document.getElementById('snap-cpu-panel');
+  const heapPanel = document.getElementById('snap-heap-panel');
+  if (cpuPanel)  cpuPanel.style.display  = tab === 'cpu'  ? '' : 'none';
+  if (heapPanel) heapPanel.style.display = tab === 'heap' ? '' : 'none';
 }
 
 // ── Source viewer ──────────────────────────────────────────────────────────

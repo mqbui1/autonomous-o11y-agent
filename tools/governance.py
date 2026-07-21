@@ -98,6 +98,22 @@ def drilldown_dimension(dimension: str) -> str:
     return summarise(rc, stdout, stderr, "drilldown_dimension")
 
 
+# Cap per-scan output to avoid overflowing the context window of smaller models.
+# Each scan result is truncated independently so the LLM always sees both sections.
+_MAX_SCAN_CHARS = 6000
+
+
+def _truncate_scan(text: str) -> str:
+    if len(text) <= _MAX_SCAN_CHARS:
+        return text
+    cut = text[:_MAX_SCAN_CHARS]
+    # Try to break on a newline for readability
+    last_nl = cut.rfind("\n")
+    if last_nl > _MAX_SCAN_CHARS // 2:
+        cut = cut[:last_nl]
+    return cut + f"\n... [output truncated — {len(text) - len(cut)} chars omitted]"
+
+
 def full_cardinality_scan(top: int = 20, ratio: float = 2.0, days: int = 7) -> str:
     """
     Run cardinality scan AND anomaly scan in parallel — more efficient than calling
@@ -124,8 +140,8 @@ def full_cardinality_scan(top: int = 20, ratio: float = 2.0, days: int = 7) -> s
     rc0, out0, err0 = results[0]
     rc1, out1, err1 = results[1]
     parts = [
-        "### Cardinality Scan\n" + summarise(rc0, out0, err0, "scan_cardinality"),
-        "### Anomaly Scan\n" + summarise(rc1, out1, err1, "scan_cardinality_anomalies"),
+        "### Cardinality Scan\n" + _truncate_scan(summarise(rc0, out0, err0, "scan_cardinality")),
+        "### Anomaly Scan\n" + _truncate_scan(summarise(rc1, out1, err1, "scan_cardinality_anomalies")),
     ]
     return "\n\n".join(parts)
 
