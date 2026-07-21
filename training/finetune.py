@@ -29,6 +29,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import subprocess
 import sys
 
@@ -44,11 +45,19 @@ OUTPUT_DIR  = pathlib.Path(__file__).parent / "output"
 _LOCAL_MODEL_DIR = pathlib.Path(__file__).parent / "models" / "qwen2.5-3b-mlx"
 MLX_MODEL = str(_LOCAL_MODEL_DIR) if _LOCAL_MODEL_DIR.exists() and (_LOCAL_MODEL_DIR / "config.json").exists() \
             else "mlx-community/Qwen2.5-3B-Instruct-4bit"
-MLX_LORA_LAYERS = 16   # top-N transformer layers to fine-tune
+MLX_LORA_LAYERS = 8     # top-N transformer layers to fine-tune — reduced from 16.
+                        # The base model is 4-bit quantized; gradients through quantized
+                        # weights are noisier, and tuning fewer layers reduces the chance
+                        # that any single layer's gradient spikes into NaN.
 MLX_BATCH       = 2     # smaller batches reduce memory pressure and gradient variance
+MLX_GRAD_ACCUM  = 4     # accumulate over 4 micro-batches (effective batch 8) to smooth
+                        # per-step gradient noise from the quantized backward pass
 MLX_ITERS       = 1800  # ~3 epochs over 1200 examples at batch 2
 MLX_LR          = 5e-6  # very conservative — higher rates cause NaN divergence
 MLX_MAX_SEQ_LEN = 2048  # 4096 pushes memory to 30 GB on 24 GB M4 Pro
+MLX_NAN_PATIENCE = 1    # abort immediately on the first NaN loss report — once the
+                        # quantized-model LoRA weights go NaN they never recover, so
+                        # continuing wastes iterations (and heat) for zero benefit
 
 # Unsloth/CUDA defaults
 CUDA_MODEL     = "Qwen/Qwen2.5-14B-Instruct"
@@ -58,24 +67,108 @@ LORA_RANK      = 32
 
 # ── Data preparation ──────────────────────────────────────────────────────────
 
-def _load_all_examples() -> list[dict]:
-    """Load synthetic + real training data, deduplicate by content hash."""
+GALILEO_LOW_SCORE  = 0.5   # avg(groundedness, factuality, completeness) below this → excluded
+GALILEO_HIGH_SCORE = 0.9   # at or above this → oversampled 2×
+
+
+def _galileo_quality(row: dict) -> float | None:
+    """Average of groundedness/factuality/completeness/instruction_adherence
+    from row['galileo_scores'], or None if the row has no Galileo scores
+    (older/rule-labeled data)."""
+    scores = row.get("galileo_scores")
+    if not scores:
+        return None
+    vals = [
+        scores.get(k) for k in
+        ("groundedness", "factuality", "completeness", "instruction_adherence")
+        if scores.get(k) is not None
+    ]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _weight_count(row: dict) -> int:
+    """How many times to include this row (0 = excluded).
+
+    Label is the primary signal; Galileo scores (when present) refine it:
+      - reject/rejected label                    → 0  (human/rule said this was wrong)
+      - Galileo flagged PII in the output         → 0  (regardless of label)
+      - Galileo quality score < GALILEO_LOW_SCORE  → 0  (label said approve, score disagrees)
+      - Galileo quality score >= GALILEO_HIGH_SCORE → 2×
+      - Galileo quality score in between            → 1×
+      - no Galileo score available                  → fall back to label only:
+            approve/approved → 2×, unlabeled → 1×
+    """
+    label = row.get("label", "unlabeled")
+    if label in ("reject", "rejected"):
+        return 0
+
+    scores = row.get("galileo_scores") or {}
+    if scores.get("pii_status") not in (None, "Not Found"):
+        return 0
+
+    quality = _galileo_quality(row)
+    if quality is not None:
+        if quality < GALILEO_LOW_SCORE:
+            return 0
+        return 2 if quality >= GALILEO_HIGH_SCORE else 1
+
+    return 2 if label in ("approve", "approved") else 1
+
+
+def _load_all_examples(data_override: str | None = None) -> list[dict]:
+    """Load synthetic + real training data, deduplicate by content hash.
+
+    If data_override is given, load only that file instead of the default
+    synthetic.jsonl + train.jsonl (used by the automated pipeline to point
+    at a freshly exported labeled dataset).
+
+    Weighting: see _weight_count() — combines the approve/reject label with
+    Galileo's continuous groundedness/factuality/completeness/pii scores
+    (deploy/galileo_scores.jsonl, merged into the export by training_pipeline.py)
+    when available, falling back to label-only weighting otherwise.
+    """
     rows = []
-    for fname in ("synthetic.jsonl", "train.jsonl"):
-        p = DATA_DIR / fname
+    sources = [pathlib.Path(data_override)] if data_override else [
+        DATA_DIR / "synthetic.jsonl", DATA_DIR / "train.jsonl",
+    ]
+    for p in sources:
         if p.exists():
             with p.open() as f:
                 for line in f:
                     line = line.strip()
                     if line:
                         rows.append(json.loads(line))
-            print(f"  Loaded {fname}: added rows (total so far: {len(rows)})")
+            print(f"  Loaded {p.name}: added rows (total so far: {len(rows)})")
+        elif data_override:
+            sys.exit(f"--data file not found: {p}")
     if not rows:
         sys.exit(
             f"No training data found in {DATA_DIR}.\n"
             "Run: python3 training/generate_synthetic.py --count 1200"
         )
-    return rows
+
+    # Apply label + Galileo-score weighting
+    weighted = []
+    excluded_count = 0
+    oversampled_count = 0
+    scored_count = 0
+    for row in rows:
+        n = _weight_count(row)
+        if row.get("galileo_scores"):
+            scored_count += 1
+        if n == 0:
+            excluded_count += 1
+            continue
+        weighted.extend([row] * n)
+        if n > 1:
+            oversampled_count += 1
+
+    print(f"  Label/Galileo weighting: {oversampled_count} oversampled (2×), "
+          f"{excluded_count} excluded, "
+          f"{len(rows) - excluded_count - oversampled_count} kept at 1× "
+          f"({scored_count}/{len(rows)} rows had Galileo scores) "
+          f"→ {len(weighted)} effective rows")
+    return weighted
 
 
 def _estimate_tokens(row: dict) -> int:
@@ -84,11 +177,11 @@ def _estimate_tokens(row: dict) -> int:
     return len(text) // 3
 
 
-def prepare_mlx_data(output_dir: pathlib.Path) -> pathlib.Path:
+def prepare_mlx_data(output_dir: pathlib.Path, data_override: str | None = None) -> pathlib.Path:
     """Split data into train/valid JSONL files for mlx-lm.
     Pre-filters examples that would exceed MLX_MAX_SEQ_LEN to prevent NaN loss.
     """
-    rows = _load_all_examples()
+    rows = _load_all_examples(data_override)
     max_chars = MLX_MAX_SEQ_LEN * 3   # conservative char limit before tokenization
     before = len(rows)
     rows = [r for r in rows if _estimate_tokens(r) < MLX_MAX_SEQ_LEN]
@@ -144,6 +237,51 @@ def _ensure_model_cached(model_id: str) -> None:
         print(f"WARNING: Pre-download failed ({e}). mlx-lm will attempt download directly.")
 
 
+_LOSS_LINE_RE = re.compile(r"(Train|Val) loss ([\w.\-]+)")
+
+
+def _run_train_failing_fast_on_nan(train_cmd):
+    """Stream the mlx_lm.lora subprocess and abort immediately on the first NaN loss.
+
+    Once a quantized-model LoRA training step produces a NaN gradient, the LoRA
+    weights are corrupted permanently — every subsequent step also reports NaN.
+    Continuing for the full --iters count just burns time/battery/heat for zero
+    benefit. Kill the subprocess the moment NaN is observed instead.
+    """
+    nan_streak = 0
+    proc = subprocess.Popen(
+        train_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    try:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            m = _LOSS_LINE_RE.search(line)
+            if m and m.group(2).lower() == "nan":
+                nan_streak += 1
+                if nan_streak >= MLX_NAN_PATIENCE:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    sys.exit(
+                        "\nABORTED: training diverged (NaN loss) — killed early to avoid "
+                        "wasting iterations. This base model is 4-bit quantized; NaN "
+                        "gradients through quantized weights are non-recoverable once they "
+                        "appear. Try: fewer --num-layers, a lower --lr, or a non-quantized "
+                        "base model if memory allows."
+                    )
+            elif m:
+                nan_streak = 0
+    finally:
+        proc.stdout.close() if proc.stdout else None
+
+    returncode = proc.wait()
+    if returncode != 0:
+        sys.exit(f"MLX training failed (exit code {returncode}).")
+
+
 def run_mlx(args):
     try:
         import mlx_lm  # noqa: F401
@@ -159,7 +297,7 @@ def run_mlx(args):
     output_dir = pathlib.Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    mlx_data   = prepare_mlx_data(output_dir)
+    mlx_data   = prepare_mlx_data(output_dir, args.data)
     adapter_dir = output_dir / "adapters"
     fused_dir   = output_dir / "fused-3b"
 
@@ -173,19 +311,18 @@ def run_mlx(args):
         "--iters", str(args.iters),
         "--batch-size", str(args.batch),
         "--num-layers", str(MLX_LORA_LAYERS),
+        "--grad-accumulation-steps", str(MLX_GRAD_ACCUM),
         "--adapter-path", str(adapter_dir),
         "--learning-rate", str(args.lr),
         "--max-seq-length", str(MLX_MAX_SEQ_LEN),
         "--optimizer", "adamw",    # weight decay prevents gradient explosion
         "--mask-prompt",           # only compute loss on assistant responses
         "--val-batches", "20",
-        "--steps-per-report", "10",
+        "--steps-per-report", "1",   # report every step — needed to fail fast on NaN
         "--steps-per-eval", "200",
         "--save-every", "200",
     ]
-    result = subprocess.run(train_cmd)
-    if result.returncode != 0:
-        sys.exit("MLX training failed.")
+    _run_train_failing_fast_on_nan(train_cmd)
 
     # ----- Fuse adapter into full model -----
     print(f"\nFusing adapter → {fused_dir} ...")
@@ -242,7 +379,7 @@ def run_cuda(args):
     output_dir = pathlib.Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = _load_all_examples()
+    rows = _load_all_examples(args.data)
     dataset = Dataset.from_list(rows)
 
     print(f"Loading {model_id} (4-bit)...")
@@ -327,6 +464,10 @@ def main():
                         help="Override HuggingFace model ID")
     parser.add_argument("--output", default=str(OUTPUT_DIR),
                         help=f"Output directory (default: {OUTPUT_DIR})")
+    parser.add_argument("--data",   default=None,
+                        help="Path to a single labeled JSONL file to train on, "
+                             "overriding the default synthetic.jsonl + train.jsonl "
+                             "(used by training_pipeline.py with exported data)")
     # MLX-specific
     parser.add_argument("--iters",  type=int, default=MLX_ITERS,
                         help=f"MLX: training steps (default: {MLX_ITERS} ≈ 3 epochs over 1200 examples)")

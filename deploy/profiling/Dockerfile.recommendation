@@ -26,3 +26,14 @@ RUN find /venv/lib -name "entry_points.txt" -path "*/opentelemetry_distro-*.dist
 # Without OTEL_PYTHON_DISTRO, OpenTelemetryDistro (index 0) runs before SplunkDistro.
 ENV OTEL_PYTHON_CONFIGURATOR=configurator
 ENV OTEL_PYTHON_DISTRO=splunk_distro
+
+# ── Trace-correlated heap allocation profiling ───────────────────────────────
+# heap_sitecustomize.py is deployed as sitecustomize.py (Python imports it
+# automatically at startup when PYTHONPATH=/opt/heap_profiling is set).
+# It patches TracerProvider.__init__ to inject HeapSnapshotProcessor before
+# any spans are recorded.  Only active when HEAP_SNAPSHOT_ENABLED=true.
+RUN mkdir -p /opt/heap_profiling
+COPY profiling/heap_snapshot_collector.py /opt/heap_profiling/heap_snapshot_collector.py
+COPY profiling/heap_sitecustomize.py      /opt/heap_profiling/sitecustomize.py
+ENV PYTHONPATH=/opt/heap_profiling
+ENV HEAP_SNAPSHOT_ENABLED=true

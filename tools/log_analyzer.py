@@ -41,34 +41,63 @@ def _api(path: str, payload: dict = None, method: str = "POST") -> dict:
 
 
 def _signalflow(program: str, start_ms: int, end_ms: int, resolution_ms: int = 60000) -> dict:
-    """Execute a SignalFlow program and return the last value per metric stream."""
+    """
+    Execute a SignalFlow program.
+
+    Returns {"series": {tsId: [values]}, "meta": {tsId: {property: value}}} —
+    metadata messages carry the dimensions/properties needed to map a tsId
+    back to a human-readable series name (e.g. service.name).
+    """
+    import urllib.parse
     cfg = get_config()
-    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute"
-    headers = {
-        "X-SF-TOKEN": cfg.token,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "program": program,
+    # start/stop/resolution/immediate are query params, NOT JSON body fields —
+    # the execute endpoint's body is the raw program text (text/plain).
+    qs = urllib.parse.urlencode({
         "start": start_ms,
         "stop": end_ms,
         "resolution": resolution_ms,
-        "immediate": True,
+        "immediate": "true",
+    })
+    url = f"https://stream.{cfg.realm}.signalfx.com/v2/signalflow/execute?{qs}"
+    headers = {
+        "X-SF-TOKEN": cfg.token,
+        "Content-Type": "text/plain",
     }
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = urllib.request.Request(url, data=program.encode(), headers=headers, method="POST")
+    series: dict[str, list] = {}
+    meta: dict[str, dict] = {}
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            # SignalFlow returns newline-delimited JSON messages
-            results = []
-            for line in resp:
-                line = line.strip()
-                if line:
+            # SignalFlow streams Server-Sent Events: "event: <type>" then one or
+            # more "data: <json-fragment>" lines, terminated by a blank line.
+            current_event_type = None
+            data_lines: list[str] = []
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                if line.startswith("event: "):
+                    current_event_type = line[7:].strip()
+                    data_lines = []
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+                elif line == "" and data_lines:
                     try:
-                        results.append(json.loads(line))
+                        msg = json.loads("\n".join(data_lines))
                     except json.JSONDecodeError:
-                        pass
-        return {"messages": results}
+                        data_lines = []
+                        continue
+                    etype = current_event_type or msg.get("type", "")
+                    if etype == "data":
+                        for point in msg.get("data", []):
+                            tsid = point.get("tsId", "")
+                            val = point.get("value")
+                            if tsid and val is not None:
+                                series.setdefault(tsid, []).append(float(val))
+                    elif etype == "metadata":
+                        tsid = msg.get("tsId", "")
+                        if tsid:
+                            meta[tsid] = msg.get("properties", {})
+                    data_lines = []
+        return {"series": series, "meta": meta}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"SignalFlow execute returned {e.code}: {body}") from e
@@ -250,23 +279,16 @@ def get_log_volume(service: str = "", hours: int = 24) -> str:
 
     try:
         result = _signalflow(program, start_ms, end_ms)
-        messages = result.get("messages", [])
+        raw_series = result.get("series", {})
+        raw_meta = result.get("meta", {})
 
-        # Extract data messages
-        series: dict[str, float] = {}
-        for msg in messages:
-            if msg.get("type") == "data":
-                for tsid, val in msg.get("data", {}).items():
-                    if val is not None:
-                        series[tsid] = series.get(tsid, 0) + val
+        # Sum each tsId's data points into a single total count
+        series: dict[str, float] = {tsid: sum(vals) for tsid, vals in raw_series.items()}
 
-        # Extract metadata for tsid → service name mapping
-        meta: dict[str, str] = {}
-        for msg in messages:
-            if msg.get("type") == "metadata":
-                props = msg.get("properties", {})
-                tsid = msg.get("tsId", "")
-                meta[tsid] = props.get("service.name", tsid)
+        # Map tsid → service name via metadata properties
+        meta: dict[str, str] = {
+            tsid: props.get("service.name", tsid) for tsid, props in raw_meta.items()
+        }
 
         if not series:
             return f"No log volume data found for environment={cfg.environment} in the last {hours}h."

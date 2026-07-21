@@ -9,3 +9,19 @@ venv/
 data/
 *.json
 !pyproject.toml
+*.log
+*.docx
+*.bak
+
+# fine-tuning artifacts: base model download, LoRA checkpoints, fused/quantized
+# models, and generated training exports — multi-GB, regenerable, not source.
+training/models/
+training/output/adapters/
+training/output/adapters_iter200_backup/
+training/output/fused-3b/
+training/output/fused-3b_iter200_backup/
+training/output/mlx-data/
+training/output/*.gguf
+fused_model/
+deploy/training_exports/
+deploy/galileo_scores.jsonl

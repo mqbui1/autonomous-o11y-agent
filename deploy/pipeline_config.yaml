@@ -1,0 +1,97 @@
+# Training pipeline phase configuration.
+#
+# Each phase runs for `min_labeled_runs` labeled assessments before advancing.
+# Fixes are applied at the END of each phase before moving to the next.
+# Phases are ordered — index 0 runs first.
+
+phases:
+
+  - name: baseline
+    description: >
+      Capture the broken baseline: governance offline (SyntaxError), flagd EventStream
+      consuming 99.75% of trace volume, cross-env detector contamination.
+      No fixes applied — just accumulate labeled training examples.
+    min_labeled_runs: 20
+    fixes: []
+    export_jsonl: false
+    finetune: false
+
+  - name: fix_governance_and_trace_noise
+    description: >
+      Fix 1: Patch the f-string SyntaxError in cardinality_governance.py so the
+      governance specialist can run fully (cardinality + anomaly data returns).
+      Fix 2: Add a filter processor to the OTel Collector to drop the noisy
+      /flagd.evaluation.v2.Service/EventStream span — restores trace volume balance.
+      Fix 3: Add a PII redaction processor for private IPv4 addresses — governance
+      no longer finds PII in-flight after this.
+      Rebuild agent image + restart collector.
+    min_labeled_runs: 20
+    fixes:
+      - type: patch_governance_syntax
+        description: "Fix f-string backslash SyntaxError in cardinality_governance.py"
+        file: "../../o11y-usage-governance/cardinality_governance.py"
+
+      - type: collector_filter_span
+        description: "Drop /flagd.evaluation.v2.Service/EventStream spans (noisy polling loop)"
+        processor_name: "filter/drop_flagd_stream"
+        span_name: "/flagd.evaluation.v2.Service/EventStream"
+
+      - type: collector_pii_redaction
+        description: "Redact private IPv4 addresses from span attributes"
+        processor_name: "redaction/pii_ipv4"
+        attributes: ["upstream_address", "peer.address", "net.sock.peer.addr"]
+
+      - type: rebuild_service
+        description: "Rebuild agent image to pick up governance fix"
+        service: "o11y-agent"
+
+      - type: restart_service
+        description: "Restart collector to apply new processor config"
+        service: "otel-collector"
+
+    export_jsonl: true
+    finetune: false
+
+  - name: increase_traffic_load
+    description: >
+      Increase synthetic load (LOCUST_USERS 5 → 15) to stress-test services and
+      generate richer error patterns. This changes service rankings in health/rca
+      assessments and may surface new latency or error-rate findings.
+      Also sets CAPTURE_TRAINING_DATA=true to ensure conversation files are captured.
+    min_labeled_runs: 20
+    fixes:
+      - type: env_var
+        description: "Scale up load generator traffic"
+        key: LOCUST_USERS
+        value: "15"
+
+      - type: restart_service
+        description: "Restart load-generator with new user count"
+        service: "load-generator"
+
+    export_jsonl: false
+    finetune: false
+
+  - name: enable_rum_sessions
+    description: >
+      Start the Playwright browser simulator (browser-sim container) so real browser
+      sessions flow through rum-proxy and fire the Splunk RUM JS SDK. This populates
+      RUM session data, Core Web Vitals, and JS errors in Splunk Observability Cloud.
+      The rum specialist will now report on live session data rather than zero sessions,
+      creating a before/after training contrast for the RUM domain.
+    min_labeled_runs: 20
+    fixes:
+      - type: start_browser_simulator
+        description: "Build and start Playwright browser-sim container (profile: rum)"
+
+    export_jsonl: false
+    finetune: false
+
+  - name: final_export_and_finetune
+    description: >
+      All four environment states captured (baseline, fixed, high-load, RUM active).
+      Export the complete labeled dataset and trigger MLX fine-tuning on the local model.
+    min_labeled_runs: 15
+    fixes: []
+    export_jsonl: true
+    finetune: true

@@ -69,8 +69,9 @@ class SnapshotStore:
     """
     Thread-safe store for snapshot profiling samples, keyed by (service, trace_id_hex).
 
-    Each record is a list of (function, file, line) tuples representing one
-    pprof sample's innermost frame (the frame consuming exclusive self-time).
+    Stores two kinds of records:
+      _records       — pprof CPU call-graph samples (data_type="cpu")
+      _alloc_records — json-alloc-v1 heap allocation diffs (data_type="allocation")
     """
 
     def __init__(self) -> None:
@@ -79,8 +80,17 @@ class SnapshotStore:
         self._records: dict[tuple[str, str], deque] = defaultdict(
             lambda: deque(maxlen=_MAXLEN_PER_TRACE)
         )
+        # (service, trace_id_hex) → deque of {ts, frames: list[dict]}
+        # frames: [{function, file, line, size_bytes, count}]
+        self._alloc_records: dict[tuple[str, str], deque] = defaultdict(
+            lambda: deque(maxlen=_MAXLEN_PER_TRACE)
+        )
 
-    def observe(self, service: str, body: str, data_format: str) -> None:
+    def observe(self, service: str, body: str, data_format: str,
+                data_type: str = "cpu") -> None:
+        if data_format == "json-alloc-v1" or data_type == "allocation":
+            self._observe_allocation(service, body)
+            return
         if data_format != "pprof-gzip-base64" or not body:
             return
 
@@ -98,6 +108,73 @@ class SnapshotStore:
                        if all(r["ts"] < cutoff for r in recs)]
             for k in expired:
                 del self._records[k]
+
+    def _observe_allocation(self, service: str, body: str) -> None:
+        """Store a json-alloc-v1 record from heap_snapshot_collector/processor."""
+        if not body:
+            return
+        try:
+            data = __import__("json").loads(body)
+        except Exception:
+            return
+        trace_id_hex = (data.get("trace_id") or "").replace("-", "").lower()
+        frames = data.get("frames") or []
+        if not trace_id_hex or not frames:
+            return
+        ts = time.time()
+        with self._lock:
+            self._alloc_records[(service, trace_id_hex)].append(
+                {"ts": ts, "frames": frames}
+            )
+            # Lazy eviction
+            cutoff = ts - _WINDOW_SECONDS
+            expired = [k for k, recs in self._alloc_records.items()
+                       if all(r["ts"] < cutoff for r in recs)]
+            for k in expired:
+                del self._alloc_records[k]
+
+    def get_allocations(self, service: str, trace_id: str) -> list[dict]:
+        """
+        Return aggregated allocation frames for a trace, ranked by size_bytes desc.
+        Returns empty list if no allocation data exists for this trace.
+        """
+        tid_hex = trace_id.replace("-", "").lower()
+        cutoff  = time.time() - _WINDOW_SECONDS
+
+        with self._lock:
+            records = list(self._alloc_records.get((service, tid_hex), []))
+
+        agg: dict[str, dict] = {}
+        for rec in records:
+            if rec["ts"] < cutoff:
+                continue
+            for frame in rec["frames"]:
+                key = f"{frame.get('file', '')}:{frame.get('function', '')}:{frame.get('line', 0)}"
+                if key in agg:
+                    agg[key]["size_bytes"] += frame.get("size_bytes", 0)
+                    agg[key]["count"]      += frame.get("count", 0)
+                else:
+                    agg[key] = {
+                        "function":   frame.get("function", "unknown"),
+                        "file":       frame.get("file", "unknown"),
+                        "line":       frame.get("line", 0),
+                        "size_bytes": frame.get("size_bytes", 0),
+                        "count":      frame.get("count", 0),
+                    }
+
+        if not agg:
+            return []
+
+        results = sorted(agg.values(), key=lambda x: -x["size_bytes"])
+        total   = sum(r["size_bytes"] for r in results) or 1
+        for r in results:
+            r["pct"] = round(r["size_bytes"] / total * 100, 1)
+        return results
+
+    def has_allocation_data(self, service: str, trace_id: str) -> bool:
+        tid_hex = trace_id.replace("-", "").lower()
+        with self._lock:
+            return (service, tid_hex) in self._alloc_records
 
     def get_slowest_methods(
         self, service: str, trace_id: str, limit: int = 5
@@ -246,8 +323,9 @@ class SnapshotStore:
 _store = SnapshotStore()
 
 
-def observe(service: str, body: str, data_format: str) -> None:
-    _store.observe(service, body, data_format)
+def observe(service: str, body: str, data_format: str,
+            data_type: str = "cpu") -> None:
+    _store.observe(service, body, data_format, data_type=data_type)
 
 
 def get_slowest_methods(service: str, trace_id: str, limit: int = 5) -> list[dict]:
@@ -260,6 +338,14 @@ def has_data(service: str, trace_id: str) -> bool:
 
 def get_hotspots(service: str, since: float = 0, until: float = 0, limit: int = 25) -> dict:
     return _store.get_hotspots(service, since=since, until=until, limit=limit)
+
+
+def get_allocations(service: str, trace_id: str) -> list[dict]:
+    return _store.get_allocations(service, trace_id)
+
+
+def has_allocation_data(service: str, trace_id: str) -> bool:
+    return _store.has_allocation_data(service, trace_id)
 
 
 def count_for_service(service: str) -> int:

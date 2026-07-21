@@ -125,3 +125,4 @@ class AgentConfig:
     synthesis_max_turns: int = field(
         default_factory=lambda: int(os.environ.get("SYNTHESIS_MAX_TURNS", "5"))
     )
+

@@ -46,5 +46,5 @@ EXPOSE 4318
 
 # Shell form so env vars are expanded at runtime.
 # --streaming enables the OTLP receiver on :4318 (collector fans out here).
-# Assessments are triggered manually via POST /api/assessment/trigger.
-CMD python3 main.py --streaming
+# --watch runs batch assessments on schedule (WATCH_INTERVAL minutes).
+CMD python3 main.py --streaming --watch --interval ${WATCH_INTERVAL}

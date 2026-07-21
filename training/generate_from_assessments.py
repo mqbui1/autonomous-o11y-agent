@@ -18,12 +18,78 @@ import importlib
 import json
 import pathlib
 import sys
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 # Specialist system prompts and tasks — loaded dynamically from the agents/ module
 SPECIALISTS = ["health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db"]
 
 STATE_DIR = pathlib.Path.home() / ".o11y-agent"
 OUT_DIR   = pathlib.Path(__file__).parent / "data"
+DEFAULT_SCORES_FILE = pathlib.Path(__file__).parent.parent / "deploy" / "galileo_scores.jsonl"
+
+
+def _load_decisions(decisions_file: Optional[pathlib.Path]) -> Dict[Tuple[str, str], str]:
+    """Load tuning_decisions.jsonl and return {(run_id, domain): "approve"|"reject"}.
+
+    When a run_id has both approve and reject for the same domain (shouldn't happen
+    but defensive), approve wins so we don't discard the example.
+    """
+    if not decisions_file or not pathlib.Path(decisions_file).exists():
+        return {}
+
+    index: Dict[Tuple[str, str], str] = {}
+    with open(decisions_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            run_id = rec.get("run_id", "")
+            domain = rec.get("domain", "")
+            decision = rec.get("decision", "")
+            if not run_id or not domain or decision not in ("approve", "reject"):
+                continue
+            key = (run_id, domain)
+            # approve beats reject
+            if index.get(key) != "approve":
+                index[key] = decision
+    return index
+
+
+def _load_galileo_scores(scores_file: Optional[pathlib.Path]) -> Dict[Tuple[str, str], dict]:
+    """Load galileo_scores.jsonl (written by deploy/auto_labeler.py) and return
+    {(run_id, domain): scores_dict}. Scores are the raw Galileo metrics
+    (groundedness/factuality/completeness/pii_status) captured alongside each
+    approve/reject decision — kept separate from the label so callers can use
+    the continuous scores later (e.g. filter/weight training data by score),
+    not just the binary decision.
+
+    Last record wins if a run_id/domain was re-scored (e.g. after a re-run).
+    """
+    if not scores_file or not pathlib.Path(scores_file).exists():
+        return {}
+
+    index: Dict[Tuple[str, str], dict] = {}
+    with open(scores_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            run_id = rec.get("run_id", "")
+            domain = rec.get("domain", "")
+            scores = rec.get("scores")
+            if not run_id or not domain or scores is None:
+                continue
+            index[(run_id, domain)] = scores
+    return index
 
 
 def _load_specialist_prompts() -> dict[str, dict]:
@@ -46,10 +112,23 @@ def _load_specialist_prompts() -> dict[str, dict]:
     return prompts
 
 
-def _from_detail_file(path: pathlib.Path, prompts: dict) -> list[dict]:
+def _from_detail_file(
+    path: pathlib.Path,
+    prompts: dict,
+    decisions: Optional[Dict[Tuple[str, str], str]] = None,
+    galileo_scores: Optional[Dict[Tuple[str, str], dict]] = None,
+) -> list[dict]:
     """
     Convert one *_detail.json file into instruction-following examples.
     One example per specialist + one synthesis example.
+
+    decisions: index from _load_decisions(). When provided, each example gets a
+    "label" field: "approved", "rejected", or "unlabeled". The finetune pipeline
+    can filter or oversample by label.
+
+    galileo_scores: index from _load_galileo_scores(). When provided and a match
+    exists, each example also gets a "galileo_scores" field (groundedness/
+    factuality/completeness/pii_status) alongside the label.
     """
     examples = []
     try:
@@ -59,6 +138,7 @@ def _from_detail_file(path: pathlib.Path, prompts: dict) -> list[dict]:
         return []
 
     env = detail.get("environment", "unknown")
+    run_id = str(detail.get("run_id") or detail.get("id") or "")
     specialists = detail.get("specialists", {})
 
     # --- Per-specialist examples ---
@@ -73,13 +153,25 @@ def _from_detail_file(path: pathlib.Path, prompts: dict) -> list[dict]:
         system = p.get("system") or f"You are the {name} observability specialist for Splunk Observability Cloud."
         task   = p.get("task")   or f"Run a complete {name} assessment for the environment."
 
-        examples.append({
+        label = "unlabeled"
+        if decisions and run_id:
+            label = decisions.get((run_id, name), "unlabeled")
+
+        example = {
             "messages": [
                 {"role": "system",    "content": system},
                 {"role": "user",      "content": f"{task}\n\nEnvironment: {env}"},
                 {"role": "assistant", "content": raw},
-            ]
-        })
+            ],
+            "label": label,
+            "run_id": run_id,
+            "domain": name,
+        }
+        if galileo_scores and run_id:
+            scores = galileo_scores.get((run_id, name))
+            if scores is not None:
+                example["galileo_scores"] = scores
+        examples.append(example)
 
     # --- Synthesis example ---
     synthesis = (detail.get("synthesis") or "").strip()
@@ -94,13 +186,24 @@ def _from_detail_file(path: pathlib.Path, prompts: dict) -> list[dict]:
         if cross:
             user_content += f"\n\n{cross}"
 
+        # Synthesis is labeled "approved" if any specialist in the run was approved
+        synth_label = "unlabeled"
+        if decisions and run_id:
+            any_approved = any(
+                decisions.get((run_id, d)) == "approve" for d in specialists
+            )
+            synth_label = "approved" if any_approved else "unlabeled"
+
         from agents.coordinator import _SYNTHESIS_SYSTEM
         examples.append({
             "messages": [
                 {"role": "system",    "content": _SYNTHESIS_SYSTEM.strip()},
                 {"role": "user",      "content": user_content},
                 {"role": "assistant", "content": synthesis},
-            ]
+            ],
+            "label": synth_label,
+            "run_id": run_id,
+            "domain": "synthesis",
         })
 
     return examples
@@ -160,6 +263,16 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-dir", default=str(STATE_DIR))
+    parser.add_argument(
+        "--decisions-file", default=None,
+        help="Path to tuning_decisions.jsonl from supervisor training_store. "
+             "Adds a 'label' field (approved/rejected/unlabeled) to each example.",
+    )
+    parser.add_argument(
+        "--scores-file", default=str(DEFAULT_SCORES_FILE),
+        help="Path to galileo_scores.jsonl (written by deploy/auto_labeler.py). "
+             f"Adds a 'galileo_scores' field to each example. Default: {DEFAULT_SCORES_FILE}",
+    )
     args = parser.parse_args()
 
     state_dir = pathlib.Path(args.state_dir)
@@ -170,13 +283,27 @@ def main():
     prompts = _load_specialist_prompts()
     print(f"  loaded prompts for: {', '.join(prompts)}")
 
+    decisions = _load_decisions(args.decisions_file)
+    if decisions:
+        approved = sum(1 for v in decisions.values() if v == "approve")
+        rejected = sum(1 for v in decisions.values() if v == "reject")
+        print(f"Loaded {len(decisions)} decision records ({approved} approved, {rejected} rejected)")
+    else:
+        print("No decisions file — all examples will be labeled 'unlabeled'")
+
+    galileo_scores = _load_galileo_scores(args.scores_file)
+    if galileo_scores:
+        print(f"Loaded {len(galileo_scores)} Galileo score records from {args.scores_file}")
+    else:
+        print(f"No Galileo scores found at {args.scores_file} — examples won't have galileo_scores")
+
     examples = []
 
     # Source 1: assessment detail files
     detail_files = list(state_dir.glob("*_detail.json"))
     print(f"\nProcessing {len(detail_files)} assessment detail file(s)...")
     for f in detail_files:
-        ex = _from_detail_file(f, prompts)
+        ex = _from_detail_file(f, prompts, decisions, galileo_scores)
         print(f"  {f.name}: {len(ex)} examples")
         examples.extend(ex)
 
@@ -198,6 +325,11 @@ def main():
     print("\nExample breakdown:")
     print(f"  From detail files:    {sum(1 for e in examples if len(e['messages']) <= 3)}")
     print(f"  From conversations:   {sum(1 for e in examples if len(e['messages']) > 3)}")
+    if decisions:
+        print("\nLabel breakdown:")
+        for label in ("approved", "rejected", "unlabeled"):
+            n = sum(1 for e in examples if e.get("label") == label)
+            print(f"  {label:12s}: {n}")
 
 
 if __name__ == "__main__":

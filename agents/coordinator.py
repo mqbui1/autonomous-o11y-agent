@@ -43,18 +43,14 @@ from agents.remediation import generate_remediations
 logger = logging.getLogger(__name__)
 
 _SYNTHESIS_SYSTEM = """\
-You are a principal observability engineer synthesizing findings from nine specialist \
-agents for Splunk Observability Cloud.
+You are a principal observability engineer synthesizing findings from specialist agents \
+for Splunk Observability Cloud.
 
 Your scope is EXCLUSIVELY the environment named below. Discard anything from other \
 environments or unrelated services.
 
-You have access to lightweight API query tools (SignalFlow metrics, APM service queries, \
-incident queries). Use them ONLY for a specific cross-domain data point that no specialist \
-collected and that would materially change the priority of findings. Do NOT re-run the \
-same slow data-gathering tools the specialists already ran (analyze_instrumentation, \
-full_cardinality_scan, check_apm_health, check_otel_collector_health — those take minutes \
-and you already have their results above).
+All data has already been collected. Write the final assessment as plain markdown text.
+Do NOT call any tools or emit tool-call syntax.
 
 Produce a complete prioritized assessment:
 1. Executive summary table (Domain | Status | Key Finding)
@@ -498,35 +494,25 @@ def _synthesize(
     custom_prompt: str | None = None,
 ) -> str:
     """
-    Final synthesis pass — LLM with full tool access so it can drill into
-    cross-cutting issues that specialists surfaced but didn't fully resolve (Gap 5).
+    Final synthesis pass — pure text generation, no tools.
+
+    All data has already been collected by specialists and is in the prompt.
+    Passing no tools prevents the model from emitting tool-call syntax and
+    guarantees a clean markdown report regardless of how the model was fine-tuned.
     """
-    # Synthesis only gets API-based tools (fast, no subprocess calls).
-    # Subprocess-heavy tools (health_check, analyzer, governance scripts, provisioner)
-    # are excluded — specialists already ran them and their outputs are in the prompt.
-    # This prevents synthesis from re-blocking on 300s subprocess timeouts.
-    from tools.log_analyzer import SCHEMAS as L_SCHEMAS, TOOL_FNS as L_FNS
-    from tools.rum_analyzer import SCHEMAS as R_SCHEMAS, TOOL_FNS as R_FNS
-    from tools.rca_tools import SCHEMAS as RCA_SCHEMAS, TOOL_FNS as RCA_FNS
-    from tools.synthetics_tools import SCHEMAS as SYN_SCHEMAS, TOOL_FNS as SYN_FNS
-    from tools.db_tools import SCHEMAS as DB_SCHEMAS, TOOL_FNS as DB_FNS
-
-    all_schemas = L_SCHEMAS + R_SCHEMAS + RCA_SCHEMAS + SYN_SCHEMAS + DB_SCHEMAS
-    all_fns = {**L_FNS, **R_FNS, **RCA_FNS, **SYN_FNS, **DB_FNS}
-
     message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
 
-    # Wrap synthesis in a thread with timeout so a runaway tool loop can't block forever
+    # Wrap synthesis in a thread with timeout so it can't block forever
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             run_agent,
             provider=get_provider(config),
             system_prompt=system,
-            tools=all_schemas,
-            tool_fns=all_fns,
+            tools=[],
+            tool_fns={},
             initial_message=message,
-            max_turns=config.synthesis_max_turns,
+            max_turns=1,
         )
         try:
             return future.result(timeout=config.synthesis_timeout)

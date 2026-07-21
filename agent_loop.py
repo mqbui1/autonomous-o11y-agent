@@ -84,6 +84,25 @@ def run_agent(
 
         if stop_reason == "tool_use":
             tool_uses = result["tool_uses"]
+            # Guard against hallucinated tool-call explosions (e.g. 73 calls in one turn)
+            _MAX_PARALLEL = 12
+            if len(tool_uses) > _MAX_PARALLEL:
+                logger.warning(
+                    "Turn %d: model requested %d tool calls — capping at %d",
+                    turn + 1, len(tool_uses), _MAX_PARALLEL,
+                )
+                tool_uses = tool_uses[:_MAX_PARALLEL]
+                # The assistant message already appended to history contains ALL tool_use
+                # blocks. Patch it to only include the IDs we're actually executing so
+                # Bedrock doesn't raise ValidationException for missing toolResult blocks.
+                import copy as _copy
+                executed_ids = {tu["id"] for tu in tool_uses}
+                patched = _copy.deepcopy(messages[-1])
+                patched["content"] = [
+                    b for b in patched["content"]
+                    if "toolUse" not in b or b["toolUse"]["toolUseId"] in executed_ids
+                ]
+                messages[-1] = patched
             logger.info(
                 "Turn %d: executing %d tool(s) in parallel: %s",
                 turn + 1,

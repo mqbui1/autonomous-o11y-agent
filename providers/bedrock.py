@@ -46,7 +46,11 @@ class BedrockProvider(LLMProvider):
     def is_token_valid(self) -> bool:
         """Quick STS check — returns False if credentials are expired or missing."""
         try:
-            boto3.client("sts", region_name=self.region).get_caller_identity()
+            # Fresh Session (not the default boto3.client) — same reasoning as
+            # _new_client(): the default session caches credentials in memory
+            # for the life of the process and never re-reads ~/.aws/credentials,
+            # so a refreshed file on disk would still fail this check.
+            boto3.Session().client("sts", region_name=self.region).get_caller_identity()
             return True
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
