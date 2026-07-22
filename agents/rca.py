@@ -135,6 +135,7 @@ def run(
         tools=all_schemas,
         tool_fns=all_tool_fns,
         initial_message=prompt,
+        max_turns=getattr(config, "specialist_max_turns", 8),
     )
 
     if "rca" in collector:

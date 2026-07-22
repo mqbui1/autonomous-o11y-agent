@@ -43,23 +43,21 @@ from agents.remediation import generate_remediations
 logger = logging.getLogger(__name__)
 
 _SYNTHESIS_SYSTEM = """\
-You are a principal observability engineer synthesizing findings from specialist agents \
-for Splunk Observability Cloud.
+You are a principal observability engineer for Splunk Observability Cloud, answering a \
+specific question from a user about an observability assessment that has already run.
 
 Your scope is EXCLUSIVELY the environment named below. Discard anything from other \
 environments or unrelated services.
 
-All data has already been collected. Write the final assessment as plain markdown text.
-Do NOT call any tools or emit tool-call syntax.
+A full structured report (executive summary, detailed findings, action plan, health \
+snapshot) has ALREADY been generated from the specialist findings below and will be \
+shown to the user alongside your answer — do NOT regenerate or repeat any of those \
+sections. Your ONLY job is to directly answer the user's question using the findings \
+as evidence.
 
-Produce a complete prioritized assessment:
-1. Executive summary table (Domain | Status | Key Finding)
-2. Cross-domain issues — services or problems appearing in multiple specialist domains
-3. Detailed findings per domain — specific numbers, service names, attribute names
-4. Prioritized action plan: Immediate / Short-term / Ongoing
-5. Health snapshot table (Area | Status | Key Metric)
-
-Lead with the highest-impact findings. Be specific — vague recommendations have no value.
+Do NOT call any tools or emit tool-call syntax. Be specific — cite service names, \
+numbers, and attribute names from the findings. Keep it tight: a few sentences to a \
+short paragraph, no filler like "Based on the results...".
 """
 
 
@@ -137,6 +135,10 @@ def run_assessment(
             name = futures[future]
             try:
                 findings[name] = future.result(timeout=config.specialist_timeout)
+                # Guard against empty summary (observed 2026-07-22: rum/db specialists on the
+                # local fine-tuned model sometimes call submit_findings with summary="").
+                if not findings[name].summary or not findings[name].summary.strip():
+                    findings[name].summary = (findings[name].raw_text or "No summary provided.")[:500]
                 logger.info("Specialist '%s' complete", name)
             except TimeoutError:
                 findings[name] = SpecialistFindings(
@@ -354,18 +356,144 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
     return "\n".join(lines)
 
 
-def _strip_non_ascii(text: str) -> str:
-    """Remove non-ASCII characters that can trigger multilingual model responses."""
-    return text.encode("ascii", errors="ignore").decode("ascii")
+_DOMAIN_ORDER = ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db", "performance")
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+_SEV_STATUS = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
 
 
-def _format_findings_for_synthesis(
+def _build_executive_summary_table(findings: dict[str, SpecialistFindings]) -> str:
+    """
+    Build the executive summary table deterministically from structured findings.
+    Built in code (not by the LLM) so it always covers every domain exactly once —
+    the LLM-generated version was observed (2026-07-22) to sometimes drop domains
+    or emit the table twice with conflicting content.
+    """
+    lines = ["## Executive Summary", "", "| Domain | Status | Key Finding |", "|--------|--------|-------------|"]
+    for name in _DOMAIN_ORDER:
+        f = findings.get(name)
+        if not f:
+            continue
+        worst = min((i.severity for i in f.issues), key=lambda s: _SEV_ORDER.get(s, 9), default=None)
+        status = _SEV_STATUS.get(worst, "NO DATA")
+        lines.append(f"| {name.upper()} | {status} | {(f.summary or '')[:120]} |")
+    return "\n".join(lines)
+
+
+def _build_detailed_findings(findings: dict[str, SpecialistFindings]) -> str:
+    """
+    Build the "Detailed Findings Per Domain" section deterministically from
+    structured findings. Built in code (not by the LLM) because the 3B synthesis
+    model was observed (2026-07-22) to misattribute findings across domains and
+    invent nonexistent specialist names even when given clean, accurate input —
+    a per-domain listing is exactly the kind of exhaustive enumeration an LLM
+    adds no value to and hallucinates most on.
+    """
+    lines = ["## Detailed Findings Per Domain"]
+    for name in _DOMAIN_ORDER:
+        f = findings.get(name)
+        if not f:
+            continue
+        lines.append(f"\n### {name.upper()}")
+        lines.append(f"**Summary:** {f.summary}")
+        if f.services_active:
+            lines.append(f"**Active services:** {', '.join(f.services_active)}")
+        if f.services_silent:
+            lines.append(f"**Silent services:** {', '.join(f.services_silent)}")
+        if f.instrumentation_score is not None:
+            lines.append(f"**Instrumentation score:** {f.instrumentation_score}/100")
+        if f.issues:
+            for issue in sorted(f.issues, key=lambda i: _SEV_ORDER.get(i.severity, 9)):
+                svc = f" [{issue.service}]" if issue.service else ""
+                lines.append(
+                    f"- **[{issue.severity.upper()}]**{svc} {issue.description} "
+                    f"→ {issue.recommendation}"
+                )
+        if f.metrics:
+            lines.append(f"**Metrics:** {f.metrics}")
+        if f.actions_taken:
+            lines.append(f"**Actions taken:** {', '.join(f.actions_taken)}")
+    return "\n".join(lines)
+
+
+def _build_action_plan(findings: dict[str, SpecialistFindings]) -> str:
+    """Build the deduplicated, severity-sorted action plan deterministically."""
+    all_issues = sorted(
+        [(f.domain, i) for f in findings.values() for i in f.issues],
+        key=lambda x: _SEV_ORDER.get(x[1].severity, 9),
+    )
+    if not all_issues:
+        return ""
+    lines = ["## Prioritized Action Plan", ""]
+    seen: set[str] = set()
+    for domain, issue in all_issues:
+        key = issue.recommendation[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        svc = f" [{issue.service}]" if issue.service else ""
+        lines.append(f"- **[{issue.severity.upper()}][{domain}{svc}]** {issue.description}")
+        lines.append(f"  → {issue.recommendation}")
+    return "\n".join(lines)
+
+
+def _build_health_snapshot(findings: dict[str, SpecialistFindings]) -> str:
+    """Build the Area | Status | Key Metric table deterministically."""
+    lines = ["## Health Snapshot", "", "| Area | Status | Key Metric |", "|------|--------|------------|"]
+    for name in _DOMAIN_ORDER:
+        f = findings.get(name)
+        if not f:
+            continue
+        worst = min((i.severity for i in f.issues), key=lambda s: _SEV_ORDER.get(s, 9), default=None)
+        status = _SEV_STATUS.get(worst, "OK" if f.services_active else "NO DATA")
+        if f.metrics:
+            k, v = next(iter(f.metrics.items()))
+            key_metric = f"{k}: {v}"
+        elif f.instrumentation_score is not None:
+            key_metric = f"score: {f.instrumentation_score}/100"
+        else:
+            key_metric = f"{len(f.issues)} issue(s)"
+        lines.append(f"| {name.upper()} | {status} | {key_metric} |")
+    return "\n".join(lines)
+
+
+def _build_deterministic_report(
     config: AgentConfig,
     findings: dict[str, SpecialistFindings],
     cross_domain: str,
-    custom_prompt: str | None,
+    footer: str,
 ) -> str:
-    """Build the synthesis prompt from structured findings."""
+    """
+    Assemble the complete assessment report from structured findings only —
+    no LLM call. Used both for the convergent-blackout fast path and as the
+    default synthesis path (2026-07-22: eliminates hallucination/rambling in
+    the "detailed findings"/"action plan" sections that a 3B synthesis LLM
+    could not reliably produce even from clean input).
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    parts = [
+        f"# Observability Assessment — `{config.environment}`",
+        f"**Timestamp:** {ts}  |  **Mode:** {'auto-apply' if config.auto_apply else 'dry-run'}",
+        "",
+        _build_executive_summary_table(findings),
+    ]
+    if cross_domain:
+        parts.extend(["", cross_domain])
+    parts.extend(["", _build_detailed_findings(findings)])
+    action_plan = _build_action_plan(findings)
+    if action_plan:
+        parts.extend(["", action_plan])
+    parts.extend(["", _build_health_snapshot(findings)])
+    parts.extend(["", "---", footer])
+    return "\n".join(parts)
+
+
+def _format_findings_for_custom_prompt(
+    config: AgentConfig,
+    findings: dict[str, SpecialistFindings],
+    cross_domain: str,
+    custom_prompt: str,
+) -> str:
+    """Build the LLM prompt for answering an ad-hoc `--prompt` question against findings."""
     parts = [
         f"# Specialist Agent Findings — `{config.environment}`",
         f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
@@ -377,7 +505,7 @@ def _format_findings_for_synthesis(
         parts.append(cross_domain)
         parts.append("")
 
-    for domain in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db"):
+    for domain in _DOMAIN_ORDER:
         f = findings.get(domain)
         if not f:
             continue
@@ -389,8 +517,7 @@ def _format_findings_for_synthesis(
             parts.append(f"**Instrumentation score:** {f.instrumentation_score}/100")
         if f.issues:
             parts.append("**Issues:**")
-            _sev_order = ["critical","high","medium","low"]
-            for issue in sorted(f.issues, key=lambda i: _sev_order.index(i.severity) if i.severity in _sev_order else 99):
+            for issue in sorted(f.issues, key=lambda i: _SEV_ORDER.get(i.severity, 9)):
                 svc = f" [{issue.service}]" if issue.service else ""
                 parts.append(
                     f"  - [{issue.severity.upper()}]{svc} {issue.description} "
@@ -398,18 +525,10 @@ def _format_findings_for_synthesis(
                 )
         if f.metrics:
             parts.append(f"**Metrics:** {f.metrics}")
-        if f.raw_text:
-            parts.append(f"\n**Full findings:**\n{_strip_non_ascii(f.raw_text)}")
         parts.append("")
 
-    if custom_prompt:
-        parts.append(f"## USER QUESTION\n{custom_prompt}\n")
-
-    parts.append(
-        "Synthesize all findings above into a complete, prioritized observability "
-        "assessment. Pay special attention to cross-domain issues. Include the "
-        "executive summary table, cross-domain section, and health snapshot."
-    )
+    parts.append(f"## USER QUESTION\n{custom_prompt}\n")
+    parts.append("Answer the user's question above directly, citing specifics from the findings.")
 
     return "\n".join(parts)
 
@@ -420,7 +539,7 @@ def _is_convergent_blackout(findings: dict[str, SpecialistFindings]) -> bool:
     report zero active services and no usable telemetry.
 
     Criteria (both must hold):
-      1. At least 7 of 9 specialists have services_active == 0 (or None)
+      1. At least 7 of 10 specialists have services_active == 0 (or None)
       2. Every specialist with an instrumentation_score reports <= 20
     """
     zero_active = sum(1 for f in findings.values() if not f.services_active)
@@ -438,53 +557,11 @@ def _fast_blackout_synthesis(
     Build a synthesis report directly from structured findings when there is
     a convergent blackout — skips the LLM pass to save 5-10 minutes.
     """
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        f"# Observability Assessment — `{config.environment}`",
-        f"**Timestamp:** {ts}  |  **Mode:** {'auto-apply' if config.auto_apply else 'dry-run'}",
-        "",
-        "## Executive Summary",
-        "",
-        "| Domain | Status | Key Finding |",
-        "|--------|--------|-------------|",
-    ]
-    _sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    for name in ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db"):
-        f = findings.get(name)
-        if not f:
-            continue
-        worst = min((i.severity for i in f.issues), key=lambda s: _sev_order.get(s, 9), default=None)
-        status = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(worst, "NO DATA")
-        lines.append(f"| {name.upper()} | {status} | {(f.summary or '')[:120]} |")
-
-    if cross_domain:
-        lines.extend(["", cross_domain])
-
-    # Collect all issues sorted by severity
-    all_issues = sorted(
-        [(f.domain, i) for f in findings.values() for i in f.issues],
-        key=lambda x: _sev_order.get(x[1].severity, 9),
-    )
-
-    if all_issues:
-        lines.extend(["", "## Prioritized Action Plan", ""])
-        seen: set[str] = set()
-        for domain, issue in all_issues:
-            key = issue.recommendation[:80]
-            if key in seen:
-                continue
-            seen.add(key)
-            svc = f" [{issue.service}]" if issue.service else ""
-            lines.append(f"- **[{issue.severity.upper()}][{domain}{svc}]** {issue.description}")
-            lines.append(f"  → {issue.recommendation}")
-
-    lines.extend([
-        "",
-        "---",
+    footer = (
         "*Synthesis LLM skipped — convergent blackout detected (all specialists "
-        "report zero active telemetry). Report built directly from structured findings.*",
-    ])
-    return "\n".join(lines)
+        "report zero active telemetry). Report built directly from structured findings.*"
+    )
+    return _build_deterministic_report(config, findings, cross_domain, footer)
 
 
 def _synthesize(
@@ -494,16 +571,27 @@ def _synthesize(
     custom_prompt: str | None = None,
 ) -> str:
     """
-    Final synthesis pass — pure text generation, no tools.
+    Final assessment report.
 
-    All data has already been collected by specialists and is in the prompt.
-    Passing no tools prevents the model from emitting tool-call syntax and
-    guarantees a clean markdown report regardless of how the model was fine-tuned.
+    The report itself (executive summary, detailed findings, action plan, health
+    snapshot) is always built deterministically from structured findings — no LLM
+    call, no risk of hallucination or rambling (2026-07-22: even given clean input,
+    the 3B synthesis model misattributed findings across domains and invented
+    nonexistent specialist names when asked to freely write these sections).
+
+    The LLM is only invoked when the caller passed a custom `--prompt` question —
+    in that case its ONLY job is to directly answer that question using the
+    findings as evidence; the deterministic report is prepended either way.
     """
-    message = _format_findings_for_synthesis(config, findings, cross_domain, custom_prompt)
+    footer = "*Report built deterministically from structured specialist findings.*"
+    report = _build_deterministic_report(config, findings, cross_domain, footer)
+
+    if not custom_prompt:
+        return report
+
+    message = _format_findings_for_custom_prompt(config, findings, cross_domain, custom_prompt)
     system = _SYNTHESIS_SYSTEM + f'\n\nEnvironment: "{config.environment}"'
 
-    # Wrap synthesis in a thread with timeout so it can't block forever
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             run_agent,
@@ -515,16 +603,12 @@ def _synthesize(
             max_turns=1,
         )
         try:
-            return future.result(timeout=config.synthesis_timeout)
+            answer = future.result(timeout=config.synthesis_timeout)
         except TimeoutError:
             logger.error("Synthesis timed out after %ds", config.synthesis_timeout)
-            return (
-                f"[Synthesis timed out after {config.synthesis_timeout}s]\n\n"
-                + "\n".join(
-                    f"**{d.upper()}:** {f.summary}"
-                    for d, f in findings.items() if f.summary
-                )
-            )
+            answer = f"[Answer timed out after {config.synthesis_timeout}s]"
+
+    return f"{report}\n\n## Answer to your question\n\n{answer}"
 
 
 def run_incident_rca(config: AgentConfig, service: str, incident_id: str = "",

@@ -92,6 +92,23 @@ def _load_galileo_scores(scores_file: Optional[pathlib.Path]) -> Dict[Tuple[str,
     return index
 
 
+def _is_garbled_submit_findings(text: str) -> bool:
+    """
+    Detect the specialist tool-call corruption pattern confirmed 2026-07-22:
+    raw JSON dict fragments leaking into free-text fields (e.g. a "summary"
+    value that is itself literally `"submitted_run", {"severity": ...}`).
+    Reuses the exact detection used for live sanitization in tools/findings.py
+    so we don't fine-tune the model to reproduce the very corruption we're
+    filtering out downstream — training on "approved-looking" examples that
+    still contain this pattern would reinforce it.
+    """
+    try:
+        from tools.findings import _looks_like_json_leak
+    except Exception:
+        return False
+    return _looks_like_json_leak(text or "")
+
+
 def _load_specialist_prompts() -> dict[str, dict]:
     """Import each specialist module and grab _SYSTEM + _TASK."""
     # Add repo root to path
@@ -148,6 +165,8 @@ def _from_detail_file(
             continue  # skip errors/timeouts
         if len(raw) < 200:
             continue  # too short to be useful
+        if _is_garbled_submit_findings(raw):
+            continue  # skip corrupted specialist output — don't train on it
 
         p = prompts.get(name, {})
         system = p.get("system") or f"You are the {name} observability specialist for Splunk Observability Cloud."
@@ -226,6 +245,7 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
 
     # Convert Bedrock-style messages to OpenAI chat format
     chat = [{"role": "system", "content": system}]
+    has_garbled_submit = False
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content", [])
@@ -245,14 +265,27 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
 
         elif role == "assistant":
             text_parts = [c.get("text", "") for c in content if isinstance(c, dict) and "text" in c]
-            tool_calls = [
-                f"[tool_call:{c.get('toolUse', {}).get('name', '')}] "
-                + json.dumps(c.get("toolUse", {}).get("input", {}))
-                for c in content if isinstance(c, dict) and "toolUse" in c
-            ]
+            tool_calls = []
+            for c in content:
+                if not (isinstance(c, dict) and "toolUse" in c):
+                    continue
+                tu = c["toolUse"]
+                if tu.get("name") == "submit_findings":
+                    inp = tu.get("input", {}) or {}
+                    fields_to_check = [inp.get("summary", "")]
+                    for issue in inp.get("issues", []) or []:
+                        if isinstance(issue, dict):
+                            fields_to_check.append(issue.get("description", ""))
+                            fields_to_check.append(issue.get("recommendation", ""))
+                    if any(_is_garbled_submit_findings(t) for t in fields_to_check):
+                        has_garbled_submit = True
+                tool_calls.append(f"[tool_call:{tu.get('name', '')}] " + json.dumps(tu.get("input", {})))
             combined = "\n".join(text_parts + tool_calls).strip()
             if combined:
                 chat.append({"role": "assistant", "content": combined})
+
+    if has_garbled_submit:
+        return []  # skip whole example — don't train the model to reproduce this corruption
 
     if len(chat) < 3:  # system + at least one exchange
         return []

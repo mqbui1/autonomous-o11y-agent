@@ -45,16 +45,35 @@ OUTPUT_DIR  = pathlib.Path(__file__).parent / "output"
 _LOCAL_MODEL_DIR = pathlib.Path(__file__).parent / "models" / "qwen2.5-3b-mlx"
 MLX_MODEL = str(_LOCAL_MODEL_DIR) if _LOCAL_MODEL_DIR.exists() and (_LOCAL_MODEL_DIR / "config.json").exists() \
             else "mlx-community/Qwen2.5-3B-Instruct-4bit"
-MLX_LORA_LAYERS = 8     # top-N transformer layers to fine-tune — reduced from 16.
+MLX_LORA_LAYERS = 4     # top-N transformer layers to fine-tune — reduced from 16, then 8.
                         # The base model is 4-bit quantized; gradients through quantized
                         # weights are noisier, and tuning fewer layers reduces the chance
-                        # that any single layer's gradient spikes into NaN.
-MLX_BATCH       = 2     # smaller batches reduce memory pressure and gradient variance
-MLX_GRAD_ACCUM  = 4     # accumulate over 4 micro-batches (effective batch 8) to smooth
-                        # per-step gradient noise from the quantized backward pass
-MLX_ITERS       = 1800  # ~3 epochs over 1200 examples at batch 2
-MLX_LR          = 5e-6  # very conservative — higher rates cause NaN divergence
-MLX_MAX_SEQ_LEN = 2048  # 4096 pushes memory to 30 GB on 24 GB M4 Pro
+                        # that any single layer's gradient spikes into NaN. Lowered 8->4
+                        # after a genuine (non-data-related) NaN at iter 513/optimizer-step 32
+                        # on 2026-07-22 — confirmed via exact seed=0 batch-order replication
+                        # that the offending row was well-formed, ruling out a data bug this
+                        # time; this matches mlx_lm's own suggested fix ("fewer --num-layers").
+MLX_BATCH       = 1     # multi-turn tool-calling examples run much longer (median
+                        # ~8k tokens with full tool-result context) than the old
+                        # final-text-only rows — batch=1 is required to fit
+                        # MLX_MAX_SEQ_LEN=4096 sequences in 24 GB RAM (batch=2 at
+                        # 4096 measured ~30 GB, OOM-risk; batch=1 measured ~16 GB).
+MLX_GRAD_ACCUM  = 16    # accumulate over 16 micro-batches (effective batch 16) — raised
+                        # from 8 after a NaN divergence at iter 113 on the tool-call-aware
+                        # dataset (longer/more-variable 4096-token sequences are higher
+                        # gradient-variance than the old final-text-only rows even with
+                        # the tokenizer-precise truncation fix). More averaging per step.
+MLX_ITERS       = 1800  # override via --iters; ~1 epoch over the tool-call-aware
+                        # dataset (~6000 rows) is ~6000 iters at batch 1
+MLX_LR          = 2e-6  # lowered from 5e-6 after the same iter-113 NaN divergence above
+MLX_MAX_SEQ_LEN = 4096  # needed to fit multi-turn tool-calling examples (system +
+                        # user + tool_calls + tool results). Rows must be
+                        # pre-filtered with the REAL tokenizer (not the char/3.5
+                        # heuristic below) before training — mlx_lm silently
+                        # truncates oversized sequences mid-JSON/mid-turn, which
+                        # empirically caused NaN loss within ~20 iterations.
+                        # See training/prepare_toolcall_data.py + the tokenizer-
+                        # precise filtering step in training.md.
 MLX_NAN_PATIENCE = 1    # abort immediately on the first NaN loss report — once the
                         # quantized-model LoRA weights go NaN they never recover, so
                         # continuing wastes iterations (and heat) for zero benefit
@@ -172,19 +191,45 @@ def _load_all_examples(data_override: str | None = None) -> list[dict]:
 
 
 def _estimate_tokens(row: dict) -> int:
-    """Rough token estimate: 1 token ≈ 3.5 chars for English/code mix."""
+    """Rough token estimate: 1 token ≈ 3.5 chars for English/code mix.
+    Used only as a fallback if the real tokenizer can't be loaded — this
+    heuristic badly UNDER-estimates JSON-heavy tool-calling content (measured
+    ~2x under real token count), so mlx_lm ends up silently truncating
+    "passing" rows mid-JSON/mid-turn, which reliably produces NaN loss within
+    ~20 iterations. Prefer the real-tokenizer path in prepare_mlx_data."""
     text = " ".join(m["content"] for m in row.get("messages", []) if m.get("content"))
     return len(text) // 3
 
 
-def prepare_mlx_data(output_dir: pathlib.Path, data_override: str | None = None) -> pathlib.Path:
+def prepare_mlx_data(output_dir: pathlib.Path, data_override: str | None = None,
+                      model: str | None = None) -> pathlib.Path:
     """Split data into train/valid JSONL files for mlx-lm.
-    Pre-filters examples that would exceed MLX_MAX_SEQ_LEN to prevent NaN loss.
+    Pre-filters examples that would exceed MLX_MAX_SEQ_LEN to prevent NaN loss,
+    using the model's real chat-template token count (not a char heuristic) —
+    mlx_lm truncates oversized sequences instead of dropping them, and
+    training on a truncated sequence (mid-JSON tool result, or missing the
+    end of the target assistant turn) is what caused NaN divergence.
     """
     rows = _load_all_examples(data_override)
-    max_chars = MLX_MAX_SEQ_LEN * 3   # conservative char limit before tokenization
     before = len(rows)
-    rows = [r for r in rows if _estimate_tokens(r) < MLX_MAX_SEQ_LEN]
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model or MLX_MODEL)
+
+        def _real_len(row):
+            try:
+                ids = tokenizer.apply_chat_template(
+                    row["messages"], tools=row.get("tools"), return_dict=False
+                )
+                return len(ids)
+            except Exception:
+                return MLX_MAX_SEQ_LEN + 1  # exclude anything that fails to render
+
+        rows = [r for r in rows if _real_len(r) < MLX_MAX_SEQ_LEN]
+    except Exception as e:
+        print(f"  WARNING: could not load tokenizer for precise length filtering "
+              f"({e}); falling back to char-count heuristic (less accurate)")
+        rows = [r for r in rows if _estimate_tokens(r) < MLX_MAX_SEQ_LEN]
     filtered = before - len(rows)
     if filtered:
         print(f"  Filtered {filtered} examples exceeding ~{MLX_MAX_SEQ_LEN} tokens")
@@ -297,7 +342,7 @@ def run_mlx(args):
     output_dir = pathlib.Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    mlx_data   = prepare_mlx_data(output_dir, args.data)
+    mlx_data   = prepare_mlx_data(output_dir, args.data, model)
     adapter_dir = output_dir / "adapters"
     fused_dir   = output_dir / "fused-3b"
 

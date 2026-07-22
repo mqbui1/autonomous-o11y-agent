@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +21,25 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 _CAPTURE_DIR = pathlib.Path(os.getenv("TRAINING_DATA_DIR", "/root/.o11y-agent/training"))
+
+# Defense-in-depth against two failure modes confirmed on the local fine-tuned
+# model (2026-07-21 live-test regression): raw <tool_call>...</tool_call> JSON
+# leaking into final prose instead of a real structured tool call, and stray
+# CJK characters leaking in despite the English-only system prompt. Cheaper
+# than retraining and catches the symptom regardless of root cause.
+_TOOL_CALL_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
+# Unclosed variant (no matching </tool_call>) — strip from the tag to end of string.
+_TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>.*", re.DOTALL)
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
+
+
+def _sanitize_final_text(text: str) -> str:
+    if not text:
+        return text
+    cleaned = _TOOL_CALL_RE.sub("", text)
+    cleaned = _TOOL_CALL_UNCLOSED_RE.sub("", cleaned)
+    cleaned = _CJK_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def run_agent(
@@ -77,7 +97,7 @@ def run_agent(
         logger.debug("Turn %d: stop_reason=%s", turn + 1, stop_reason)
 
         if stop_reason == "end_turn":
-            final_text = result["text"]
+            final_text = _sanitize_final_text(result["text"])
             if capture:
                 _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
             return final_text
@@ -109,8 +129,42 @@ def run_agent(
                 len(tool_uses),
                 [t["name"] for t in tool_uses],
             )
-            results = _execute_parallel(tool_uses, tool_fns, provider)
+            results, id_to_result = _execute_parallel(tool_uses, tool_fns, provider)
+
+            # Budget nudge: if the model is looping on investigative tools without
+            # ever calling submit_findings (confirmed 2026-07-21/22: detector/synthetics
+            # specialists cycling audit_detectors/get_broken_detectors etc. and hitting
+            # max_turns without submitting), force it to wrap up before the budget runs
+            # out. Appended as an extra content block in the same tool-result message
+            # (not a separate message) to keep clean user/assistant alternation.
+            turns_remaining = max_turns - (turn + 1)
+            if 0 < turns_remaining <= 2:
+                results = results + [{
+                    "text": f"[REMINDER: You have {turns_remaining} turn(s) left. "
+                             "Call submit_findings NOW with whatever findings you have "
+                             "so far — do not call any more investigative tools.]"
+                }]
+
             messages.append({"role": "user", "content": results})
+
+            # Hard stop once submit_findings succeeds. submit_findings is a
+            # side-effecting tool (writes structured findings into the caller's
+            # collector dict) — the model's job is done at that point, regardless
+            # of what it does next. Confirmed root cause of a 2026-07-21 production
+            # regression ("Agent reached max turns without completing"): the model
+            # kept calling more tools after "Findings recorded. Assessment
+            # complete.", eventually hitting max_turns and discarding a
+            # perfectly good final report in favor of a useless raw_text.
+            submit_call = next((tu for tu in tool_uses if tu.get("name") == "submit_findings"), None)
+            if submit_call is not None:
+                submit_result = id_to_result.get(submit_call["id"], "")
+                if not submit_result.lower().startswith(("tool ", "unknown tool")):
+                    final_text = _sanitize_final_text(
+                        submit_call.get("input", {}).get("summary") or submit_result
+                    )
+                    if capture:
+                        _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                    return final_text
             continue
 
         logger.warning("Unexpected stop_reason: %s — stopping", stop_reason)
@@ -121,8 +175,8 @@ def run_agent(
 
 def _execute_parallel(
     tool_uses: list[dict], tool_fns: dict[str, Callable], provider
-) -> list[dict]:
-    """Execute tool calls concurrently; return toolResult content blocks."""
+) -> tuple[list[dict], dict[str, str]]:
+    """Execute tool calls concurrently; return (toolResult content blocks, id -> raw result text)."""
     id_to_result: dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=len(tool_uses)) as pool:
@@ -137,10 +191,11 @@ def _execute_parallel(
             except Exception as exc:
                 id_to_result[tool_use_id] = f"Tool execution error: {exc}"
 
-    return [
+    results = [
         provider.format_tool_result(tid, text)
         for tid, text in id_to_result.items()
     ]
+    return results, id_to_result
 
 
 def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
