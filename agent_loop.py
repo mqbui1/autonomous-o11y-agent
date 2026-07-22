@@ -42,6 +42,27 @@ def _sanitize_final_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _converse_with_retry(
+    provider, system_prompt: str, messages: list, native_tools: list, max_attempts: int = 3,
+) -> dict:
+    """Retry a single converse() call if the model returns a fully degenerate
+    turn (stop_reason=end_turn, no text, no tool calls). Confirmed on the
+    local fine-tuned model (2026-07-22, round 6, after fixing the Ollama
+    Modelfile TEMPLATE bug): with temperature=0.1 the model still
+    occasionally emits a completely empty response on turn 1 (~1/3 of calls,
+    non-deterministic) -- distinct from the <tool_call>-text-leak issue,
+    which the TEMPLATE fix resolved. A cheap regeneration retry clears it in
+    practice since it's not correlated with any specific prompt content.
+    """
+    for attempt in range(max_attempts):
+        result = provider.converse(system_prompt=system_prompt, messages=messages, tools=native_tools)
+        if result["stop_reason"] == "end_turn" and not (result["text"] or "").strip():
+            logger.warning("Empty end_turn response (attempt %d/%d) — retrying", attempt + 1, max_attempts)
+            continue
+        return result
+    return result
+
+
 def run_agent(
     system_prompt: str,
     tools: list[dict],
@@ -77,11 +98,7 @@ def run_agent(
     native_tools = provider.convert_tools(tools)
 
     for turn in range(max_turns):
-        result = provider.converse(
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=native_tools,
-        )
+        result = _converse_with_retry(provider, system_prompt, messages, native_tools)
         stop_reason = result["stop_reason"]
 
         # Append the assistant turn to history
