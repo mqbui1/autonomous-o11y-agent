@@ -25,3 +25,5 @@ training/output/*.gguf
 fused_model/
 deploy/training_exports/
 deploy/galileo_scores.jsonl
+training/data/raw_captures/
+training/data/toolcall_train.jsonl

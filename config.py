@@ -117,9 +117,11 @@ class AgentConfig:
     synthesis_timeout: int = field(
         default_factory=lambda: int(os.environ.get("SYNTHESIS_TIMEOUT", "900"))
     )
-    # Max LLM turns per specialist (default 8 — enough for any domain, prevents runaway loops)
+    # Max LLM turns per specialist (default 12 — RCA's 8-step investigation plus any
+    # redundant tool calls from the local fine-tuned model needs headroom beyond 8;
+    # confirmed via live-test regression 2026-07-22 that 8 was too tight)
     specialist_max_turns: int = field(
-        default_factory=lambda: int(os.environ.get("SPECIALIST_MAX_TURNS", "8"))
+        default_factory=lambda: int(os.environ.get("SPECIALIST_MAX_TURNS", "12"))
     )
     # Max LLM turns for synthesis (default 5 — synthesis should drill, not loop)
     synthesis_max_turns: int = field(

@@ -8,8 +8,51 @@ The coordinator reads the structured data to:
   - Track action feedback between runs    (Gap 7)
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from agent_loop import _sanitize_final_text
+
+# Defense-in-depth against specialist-level generation defects observed on the local
+# fine-tuned model (2026-07-22 live-test regression): raw JSON dict fragments leaking
+# into free-text fields (e.g. summary=`"submitted_run", {"severity": "critical", ...`),
+# and text truncated mid-sentence. Cheaper than retraining and catches the symptom
+# regardless of root cause — same philosophy as agent_loop.py's _sanitize_final_text.
+_JSON_LEAK_START_RE = re.compile(r'^\s*"[a-z_]+"\s*,\s*\{')
+_DICT_KEY_RE = re.compile(r'"(severity|domain|description|recommendation|action_args|action_tool)"\s*:')
+_DESC_VALUE_RE = re.compile(r'"description"\s*:\s*"([^"]{10,300})"')
+_SENTENCE_END_RE = re.compile(r'[.!?]["\')]*\s')
+
+
+def _looks_like_json_leak(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_JSON_LEAK_START_RE.match(text)) or len(_DICT_KEY_RE.findall(text)) >= 2
+
+
+def _trim_truncated_tail(text: str) -> str:
+    """If text appears cut off mid-sentence, trim back to the last complete sentence."""
+    stripped = text.rstrip()
+    if not stripped or len(stripped) < 40 or stripped[-1] in '.!?"\')':
+        return text
+    matches = list(_SENTENCE_END_RE.finditer(text))
+    if matches:
+        cut = matches[-1].end()
+        if cut > len(text) * 0.4:  # don't throw away most of the text
+            return text[:cut].strip()
+    return text.strip()
+
+
+def _clean_findings_text(text: str, fallback: str = "") -> str:
+    """Sanitize a free-text field from a specialist's submit_findings call."""
+    cleaned = _sanitize_final_text(text or "")
+    if _looks_like_json_leak(cleaned):
+        m = _DESC_VALUE_RE.search(cleaned)
+        if m:
+            return m.group(1).strip()
+        return fallback or "[Malformed specialist output — raw JSON leaked into this field]"
+    return _trim_truncated_tail(cleaned)
 
 
 @dataclass
@@ -149,12 +192,19 @@ def make_submit_fn(collector: dict, domain: str):
             if isinstance(i, dict):
                 # Strip unknown keys so Issue() doesn't choke on extra fields
                 known = {f.name for f in Issue.__dataclass_fields__.values()}
-                parsed_issues.append(Issue(**{k: v for k, v in i.items() if k in known}))
+                issue = Issue(**{k: v for k, v in i.items() if k in known})
             else:
-                parsed_issues.append(i)
+                issue = i
+            issue.description = _clean_findings_text(
+                issue.description, fallback="[Malformed specialist output for this finding]"
+            )
+            issue.recommendation = (
+                _clean_findings_text(issue.recommendation) or "No specific recommendation provided."
+            )
+            parsed_issues.append(issue)
         collector[domain] = SpecialistFindings(
             domain=domain,
-            summary=summary,
+            summary=_clean_findings_text(summary, fallback=f"[{domain} specialist output malformed]"),
             services_active=services_active or [],
             services_silent=services_silent or [],
             instrumentation_score=instrumentation_score,
