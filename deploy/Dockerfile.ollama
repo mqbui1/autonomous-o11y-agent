@@ -12,10 +12,18 @@ FROM ollama/ollama:latest
 
 ARG GGUF_PATH=training/output/o11y-agent-3b-q4km.gguf
 ARG MODEL_NAME=o11y-agent-3b
+ARG MODELFILE_PATH=training/output/Modelfile
 
 COPY ${GGUF_PATH} /models/${MODEL_NAME}.gguf
 
-RUN printf 'FROM /models/%s.gguf\nPARAMETER num_ctx 32768\nPARAMETER temperature 0.1\nPARAMETER top_p 0.9\nPARAMETER repeat_penalty 1.1\n' "${MODEL_NAME}" > /models/Modelfile
+# IMPORTANT: copy the repo's Modelfile (has the Qwen2.5 tool-calling TEMPLATE
+# block) rather than regenerating a bare 'FROM ...' file here. A template-less
+# Modelfile makes Ollama fall back to a no-op '{{ .Prompt }}' template with no
+# tool-call grammar, which intermittently leaks raw <tool_call>...</tool_call>
+# text as plain assistant output instead of parsed tool calls (confirmed root
+# cause, 2026-07-22 round 6).
+COPY ${MODELFILE_PATH} /models/Modelfile
+RUN sed -i "1s|.*|FROM /models/${MODEL_NAME}.gguf|" /models/Modelfile
 
 # Pre-load the model so first inference is instant (no cold-start delay)
 RUN ollama serve & \
