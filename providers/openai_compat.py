@@ -56,7 +56,7 @@ class OpenAICompatProvider(LLMProvider):
             })
         return converted
 
-    def converse(self, system_prompt: str, messages: list[dict], tools: list[dict]) -> dict:
+    def converse(self, system_prompt: str, messages: list[dict], tools: list[dict], force_tool: str = None) -> dict:
         openai_messages = [{"role": "system", "content": system_prompt}]
 
         for msg in messages:
@@ -103,7 +103,10 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             # tools is already in OpenAI format (converted by agent_loop via convert_tools)
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = (
+                {"type": "function", "function": {"name": force_tool}}
+                if force_tool else "auto"
+            )
 
         response = self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]

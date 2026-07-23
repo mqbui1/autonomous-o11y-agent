@@ -64,14 +64,17 @@ class BedrockProvider(LLMProvider):
     def convert_tools(self, tools: list[dict]) -> list:
         return tools
 
-    def converse(self, system_prompt: str, messages: list[dict], tools: list[dict]) -> dict:
+    def converse(self, system_prompt: str, messages: list[dict], tools: list[dict], force_tool: str = None) -> dict:
         kwargs = dict(
             modelId=self.model_id,
             system=[{"text": system_prompt}],
             messages=messages,
         )
         if tools:
-            kwargs["toolConfig"] = {"tools": tools}
+            tool_config = {"tools": tools}
+            if force_tool:
+                tool_config["toolChoice"] = {"tool": {"name": force_tool}}
+            kwargs["toolConfig"] = tool_config
 
         last_exc = None
         for attempt, delay in enumerate([0] + _RETRY_DELAYS):

@@ -8,6 +8,7 @@ The coordinator reads the structured data to:
   - Track action feedback between runs    (Gap 7)
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -190,21 +191,40 @@ def make_submit_fn(collector: dict, domain: str):
         parsed_issues = []
         for i in (issues or []):
             if isinstance(i, dict):
-                # Strip unknown keys so Issue() doesn't choke on extra fields
+                # Strip unknown keys so Issue() doesn't choke on extra fields. Also
+                # backfill missing required fields (severity/domain/description) with
+                # safe defaults — confirmed 2026-07-22 round 7: the local fine-tuned
+                # model sometimes omits a required field (e.g. nests "recommendation"/
+                # "domain" inside "action_args" instead of top-level), which previously
+                # crashed Issue(**{...}) with a raw TypeError. That exception propagated
+                # all the way up and silently discarded a forced last-turn submit_findings
+                # call, producing "Agent reached max turns without completing." instead of
+                # a partial (if imperfect) report.
                 known = {f.name for f in Issue.__dataclass_fields__.values()}
-                issue = Issue(**{k: v for k, v in i.items() if k in known})
+                filtered = {k: v for k, v in i.items() if k in known}
+                filtered.setdefault("severity", "medium")
+                filtered.setdefault("domain", domain)
+                filtered.setdefault("description", "")
+                issue = Issue(**filtered)
             else:
                 issue = i
             issue.description = _clean_findings_text(
-                issue.description, fallback="[Malformed specialist output for this finding]"
+                str(issue.description) if issue.description else "",
+                fallback="[Malformed specialist output for this finding]",
             )
             issue.recommendation = (
-                _clean_findings_text(issue.recommendation) or "No specific recommendation provided."
+                _clean_findings_text(str(issue.recommendation) if issue.recommendation else "")
+                or "No specific recommendation provided."
             )
             parsed_issues.append(issue)
+        # summary is normally a string, but the model occasionally passes a dict
+        # (confirmed 2026-07-22 round 7: "Tool submit_findings failed: expected
+        # string or bytes-like object, got 'dict'") — coerce defensively.
+        if isinstance(summary, dict):
+            summary = summary.get("text") or summary.get("summary") or json.dumps(summary)
         collector[domain] = SpecialistFindings(
             domain=domain,
-            summary=_clean_findings_text(summary, fallback=f"[{domain} specialist output malformed]"),
+            summary=_clean_findings_text(str(summary or ""), fallback=f"[{domain} specialist output malformed]"),
             services_active=services_active or [],
             services_silent=services_silent or [],
             instrumentation_score=instrumentation_score,

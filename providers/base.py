@@ -18,9 +18,15 @@ class LLMProvider(ABC):
         system_prompt: str,
         messages: list[dict],
         tools: list[dict],
+        force_tool: str = None,
     ) -> dict:
         """
         Send a conversation turn to the model.
+
+        force_tool: if set, constrain the model to call this specific tool
+        (grammar-enforced by the provider, not just a text hint). Used by
+        agent_loop.py to guarantee submit_findings is called on the final
+        turn instead of relying on the model to follow a text reminder.
 
         Returns a normalized response dict:
           {
