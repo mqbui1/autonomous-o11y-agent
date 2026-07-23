@@ -152,6 +152,23 @@ def evaluate(domain, spec, detail):
         if pattern.lower() in raw.lower():
             return "reject", f"agent runtime error — not real analysis: {pattern}"
 
+    # 3. Narrate-instead-of-invoke — the model describes calling a tool in prose
+    #    instead of actually calling it, producing rambling scratchpad text that
+    #    reads like real analysis but never yielded structured findings (the
+    #    specialist's own fallback then truncates it via raw_text[:500]). Confirmed
+    #    2026-07-23 recurring on logs ("Let's call `get_non_critical_errors` now.")
+    #    and rca. The old logs rule below blanket-approved any output that mentioned
+    #    "404"/"Log Observer" regardless of this — checked before domain logic so
+    #    every domain benefits.
+    RAMBLING_MARKERS = [
+        "let's call", "let me call", "i'll call", "i will call",
+        "let's use the tool", "let me use the tool", "i'll use the tool", "i will use the tool",
+        "let's invoke", "let me invoke", "i'll invoke", "i will invoke",
+        "next i will", "next, i will", "let's take action now",
+    ]
+    if any(m in raw.lower() for m in RAMBLING_MARKERS):
+        return "reject", "specialist narrated tool calls as prose instead of invoking them (rambling scratchpad output)"
+
     if domain == "instrumentation":
         # Reject if it contradicts itself: claims service.name absent from 100% of
         # spans yet health/other specialists show multiple active named services.

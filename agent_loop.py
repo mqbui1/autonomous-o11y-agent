@@ -31,6 +31,7 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 # Unclosed variant (no matching </tool_call>) — strip from the tag to end of string.
 _TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>.*", re.DOTALL)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
+_TIMEOUT_RE = re.compile(r"timed out after \d+ seconds", re.IGNORECASE)
 
 
 def _extract_fake_tool_call_summary(text: str) -> str | None:
@@ -163,6 +164,7 @@ def run_agent(
     submit_findings_called = False
     blank_submit_retried = False
     end_turn_retried = False
+    already_timed_out_tools: set = set()
     for turn in range(max_turns):
         # Force submit_findings (grammar-enforced by the provider) on the final turn
         # if it hasn't been called yet. Confirmed 2026-07-21/22: detector/synthetics/
@@ -256,7 +258,25 @@ def run_agent(
                 len(tool_uses),
                 [t["name"] for t in tool_uses],
             )
-            results, id_to_result = _execute_parallel(tool_uses, tool_fns, provider)
+            # If a tool already timed out earlier this run, don't spend another full
+            # timeout budget calling it again — the model sometimes ignores the prompt-
+            # level "if it times out, do NOT retry" instruction (weak instruction-
+            # following on the local fine-tuned model). Confirmed 2026-07-23: detector
+            # specialist retry-looping provision_detectors after each 180s/480s timeout,
+            # burning through specialist_max_turns with nothing to show.
+            to_skip = [tu for tu in tool_uses if tu["name"] in already_timed_out_tools]
+            to_run = [tu for tu in tool_uses if tu["name"] not in already_timed_out_tools]
+            results, id_to_result = _execute_parallel(to_run, tool_fns, provider) if to_run else ([], {})
+            for tu in to_skip:
+                skip_msg = (
+                    f"Tool {tu['name']} already timed out earlier this run — do NOT "
+                    "call it again. Call submit_findings now with whatever you have."
+                )
+                id_to_result[tu["id"]] = skip_msg
+                results.append(provider.format_tool_result(tu["id"], skip_msg))
+            for tu in to_run:
+                if _TIMEOUT_RE.search(id_to_result.get(tu["id"], "")):
+                    already_timed_out_tools.add(tu["name"])
 
             # Budget nudge: if the model is looping on investigative tools without
             # ever calling submit_findings (confirmed 2026-07-21/22: detector/synthetics
