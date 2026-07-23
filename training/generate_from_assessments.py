@@ -349,10 +349,24 @@ def main():
 
     examples = []
 
-    # Source 1: assessment detail files
-    detail_files = list(state_dir.glob("*_detail.json"))
+    # Source 1: assessment detail files. Includes both the single rolling
+    # "*_detail.json" file and the per-run "*_detail_run_<hex>.json" snapshots
+    # (500 confirmed present 2026-07-23 — previously silently skipped since the
+    # glob only matched the rolling file). The rolling file's run_id can
+    # duplicate one of the per-run snapshots, so dedup by run_id.
+    detail_files = list(state_dir.glob("*_detail.json")) + list(state_dir.glob("*_detail_run_*.json"))
     print(f"\nProcessing {len(detail_files)} assessment detail file(s)...")
+    seen_run_ids = set()
     for f in detail_files:
+        try:
+            run_id = json.loads(f.read_text()).get("run_id")
+        except Exception:
+            run_id = None
+        if run_id and run_id in seen_run_ids:
+            print(f"  {f.name}: skipped (duplicate run_id {run_id})")
+            continue
+        if run_id:
+            seen_run_ids.add(run_id)
         ex = _from_detail_file(f, prompts, decisions, galileo_scores)
         print(f"  {f.name}: {len(ex)} examples")
         examples.extend(ex)
