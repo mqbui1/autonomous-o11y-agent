@@ -203,11 +203,21 @@ def _submit_findings_is_garbled(msg: dict) -> bool:
         if fn.get("name") != "submit_findings":
             continue
         args = fn.get("arguments", {}) or {}
-        fields = [args.get("summary", "")]
+
+        def _as_text(v):
+            # The model occasionally passes a dict/list where a string is
+            # expected (same malformed shape tools/findings.py already
+            # defends against at inference time) -- coerce instead of
+            # crashing _looks_like_json_leak's regex match.
+            if isinstance(v, str):
+                return v
+            return json.dumps(v) if v else ""
+
+        fields = [_as_text(args.get("summary", ""))]
         for issue in args.get("issues", []) or []:
             if isinstance(issue, dict):
-                fields.append(issue.get("description", ""))
-                fields.append(issue.get("recommendation", ""))
+                fields.append(_as_text(issue.get("description", "")))
+                fields.append(_as_text(issue.get("recommendation", "")))
         if any(_looks_like_json_leak(t) for t in fields):
             return True
     return False
