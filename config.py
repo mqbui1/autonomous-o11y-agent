@@ -71,6 +71,15 @@ class AgentConfig:
     subprocess_timeout: int = field(
         default_factory=lambda: int(os.environ.get("TOOL_TIMEOUT", "60"))
     )
+    # provision_detectors/retune_detectors do real per-service baseline learning
+    # (multiple SignalFlow queries per service) — genuinely slower than other
+    # subprocess tools. Confirmed 2026-07-23: with the default TOOL_TIMEOUT (180s)
+    # this routinely timed out on environments with more than a handful of
+    # services, driving the detector specialist into a retry loop. Give it its
+    # own, longer budget instead of raising the timeout for every tool.
+    provision_timeout: int = field(
+        default_factory=lambda: int(os.environ.get("PROVISION_TIMEOUT", "480"))
+    )
     specialist_timeout: int = field(
         default_factory=lambda: int(os.environ.get("SPECIALIST_TIMEOUT", "900"))
     )

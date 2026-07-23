@@ -53,7 +53,7 @@ def provision_detectors(
     if reconcile:
         cmd.append("--reconcile")
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path)
+    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path, timeout=cfg.provision_timeout)
     return summarise(rc, stdout, stderr, "provision_detectors")
 
 
@@ -79,7 +79,7 @@ def retune_detectors(service: str = "") -> str:
     if service or cfg.service:
         cmd.extend(["--service", service or cfg.service])
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path)
+    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path, timeout=cfg.provision_timeout)
     return summarise(rc, stdout, stderr, "retune_detectors")
 
 
