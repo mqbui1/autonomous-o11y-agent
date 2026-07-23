@@ -33,17 +33,51 @@ _TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>.*", re.DOTALL)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
 
 
+def _extract_fake_tool_call_summary(text: str) -> str | None:
+    """Detect a JSON-encoded tool-call description masquerading as plain
+    end_turn text (e.g. '[{"function_name": "submit_findings", "arguments":
+    {"summary": "..."}}]') and pull out the human-readable summary instead
+    of letting raw JSON leak into the final report. Confirmed 2026-07-22
+    round 7: prompted by the end-turn-must-call-submit_findings nudge below,
+    the model sometimes "complies" by describing the call as text instead
+    of actually invoking the tool via the provider's tool-calling API.
+    """
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not data:
+        return None
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        args = item.get("arguments") or item.get("input") or item.get("parameters")
+        if isinstance(args, dict) and args.get("summary"):
+            return str(args["summary"]).strip()
+    return None
+
+
 def _sanitize_final_text(text: str) -> str:
     if not text:
         return text
     cleaned = _TOOL_CALL_RE.sub("", text)
     cleaned = _TOOL_CALL_UNCLOSED_RE.sub("", cleaned)
     cleaned = _CJK_RE.sub("", cleaned)
+    cleaned = cleaned.strip()
+    fake_summary = _extract_fake_tool_call_summary(cleaned)
+    if fake_summary:
+        cleaned = fake_summary
     return cleaned.strip()
 
 
 def _converse_with_retry(
     provider, system_prompt: str, messages: list, native_tools: list, max_attempts: int = 3,
+    force_tool: str = None,
 ) -> dict:
     """Retry a single converse() call if the model returns a fully degenerate
     turn (stop_reason=end_turn, no text, no tool calls). Confirmed on the
@@ -55,7 +89,9 @@ def _converse_with_retry(
     practice since it's not correlated with any specific prompt content.
     """
     for attempt in range(max_attempts):
-        result = provider.converse(system_prompt=system_prompt, messages=messages, tools=native_tools)
+        result = provider.converse(
+            system_prompt=system_prompt, messages=messages, tools=native_tools, force_tool=force_tool,
+        )
         if result["stop_reason"] == "end_turn" and not (result["text"] or "").strip():
             logger.warning("Empty end_turn response (attempt %d/%d) — retrying", attempt + 1, max_attempts)
             continue
@@ -97,8 +133,23 @@ def run_agent(
     messages = [{"role": "user", "content": [{"text": initial_message}]}]
     native_tools = provider.convert_tools(tools)
 
+    has_submit_tool = any(
+        t.get("toolSpec", {}).get("name") == "submit_findings" for t in tools
+    )
+    submit_findings_called = False
+    blank_submit_retried = False
+    end_turn_retried = False
     for turn in range(max_turns):
-        result = _converse_with_retry(provider, system_prompt, messages, native_tools)
+        # Force submit_findings (grammar-enforced by the provider) on the final turn
+        # if it hasn't been called yet. Confirmed 2026-07-21/22: detector/synthetics/
+        # rum/rca specialists sometimes cycle investigative tools without ever calling
+        # submit_findings, ignoring the text-based budget nudge below (weak instruction-
+        # following on the local fine-tuned model) and burning through max_turns with
+        # nothing to show. A hard tool_choice constraint on the last turn guarantees
+        # some structured output instead of "Agent reached max turns without completing."
+        is_last_turn = turn == max_turns - 1
+        force_tool = "submit_findings" if (has_submit_tool and not submit_findings_called and is_last_turn) else None
+        result = _converse_with_retry(provider, system_prompt, messages, native_tools, force_tool=force_tool)
         stop_reason = result["stop_reason"]
 
         # Append the assistant turn to history
@@ -114,6 +165,24 @@ def run_agent(
         logger.debug("Turn %d: stop_reason=%s", turn + 1, stop_reason)
 
         if stop_reason == "end_turn":
+            turns_remaining = max_turns - (turn + 1)
+            # Reject a plain-text end_turn once and nudge the model to call
+            # submit_findings instead, if it never has. Confirmed 2026-07-22
+            # round 7: RCA specialist finishes investigating but responds with
+            # rambling scratchpad-style plain text ("Let's take action now: ...")
+            # instead of calling submit_findings — the specialist's raw_text[:500]
+            # fallback then truncates this mid-sentence in the final report.
+            if has_submit_tool and not submit_findings_called and not end_turn_retried and turns_remaining > 0:
+                end_turn_retried = True
+                messages.append({
+                    "role": "user",
+                    "content": [{
+                        "text": "[REMINDER: Do not respond with plain text. You must call "
+                                 "the submit_findings tool now with your structured results "
+                                 "as your final action.]"
+                    }]
+                })
+                continue
             final_text = _sanitize_final_text(result["text"])
             if capture:
                 _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
@@ -162,8 +231,6 @@ def run_agent(
                              "so far — do not call any more investigative tools.]"
                 }]
 
-            messages.append({"role": "user", "content": results})
-
             # Hard stop once submit_findings succeeds. submit_findings is a
             # side-effecting tool (writes structured findings into the caller's
             # collector dict) — the model's job is done at that point, regardless
@@ -176,12 +243,30 @@ def run_agent(
             if submit_call is not None:
                 submit_result = id_to_result.get(submit_call["id"], "")
                 if not submit_result.lower().startswith(("tool ", "unknown tool")):
-                    final_text = _sanitize_final_text(
-                        submit_call.get("input", {}).get("summary") or submit_result
-                    )
+                    submit_findings_called = True
+                    submitted_summary = (submit_call.get("input", {}).get("summary") or "").strip()
+                    # Reject a blank summary once and give the model a chance to
+                    # resubmit with real content, instead of silently falling through
+                    # to the tool's generic "Findings recorded." string. Confirmed
+                    # 2026-07-22 round 7: governance/synthetics call submit_findings
+                    # with summary="" (and often issues=[]) even after real, successful
+                    # tool investigation — the generic fallback masked this as if
+                    # nothing was wrong.
+                    if not submitted_summary and not blank_submit_retried and turns_remaining > 0:
+                        blank_submit_retried = True
+                        results = results + [{
+                            "text": "[REMINDER: Your submit_findings call had an empty "
+                                     "summary. Call submit_findings again with a non-empty "
+                                     "2-4 sentence summary of what you found.]"
+                        }]
+                        messages.append({"role": "user", "content": results})
+                        continue
+                    final_text = _sanitize_final_text(submitted_summary or submit_result)
                     if capture:
                         _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
                     return final_text
+
+            messages.append({"role": "user", "content": results})
             continue
 
         logger.warning("Unexpected stop_reason: %s — stopping", stop_reason)
