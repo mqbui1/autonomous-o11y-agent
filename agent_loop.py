@@ -62,6 +62,30 @@ def _extract_fake_tool_call_summary(text: str) -> str | None:
     return None
 
 
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(\{.*?\})\s*```", re.DOTALL)
+
+
+def _extract_fenced_json_submit_call(text: str) -> dict | None:
+    """Detect a fenced ```json code block containing a valid submit_findings-shaped
+    object (has a "summary" or "issues" key) instead of a real tool call. Confirmed
+    2026-07-23: the instrumentation specialist sometimes ends its turn with apology
+    prose plus a fenced JSON block with the right shape, alongside a second malformed
+    pseudo-call block (JS-object syntax, unquoted keys) it never manages to fix. Only
+    the first well-formed JSON block is used; malformed blocks are ignored rather
+    than repaired.
+    """
+    if not text or "```" not in text:
+        return None
+    for match in _FENCED_JSON_RE.finditer(text):
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and ("summary" in data or "issues" in data):
+            return data
+    return None
+
+
 def _sanitize_final_text(text: str) -> str:
     if not text:
         return text
@@ -166,6 +190,23 @@ def run_agent(
 
         if stop_reason == "end_turn":
             turns_remaining = max_turns - (turn + 1)
+            # If the model narrated the intended submit_findings call as a fenced
+            # JSON block instead of actually invoking the tool, use it directly —
+            # this recovers real structured findings instead of falling back to a
+            # truncated raw_text[:500] summary. See _extract_fenced_json_submit_call.
+            if has_submit_tool and not submit_findings_called:
+                fenced_call = _extract_fenced_json_submit_call(result["text"] or "")
+                submit_fn = tool_fns.get("submit_findings") if fenced_call is not None else None
+                if submit_fn is not None:
+                    try:
+                        submit_result = submit_fn(**fenced_call)
+                        submit_findings_called = True
+                        final_text = _sanitize_final_text(str(fenced_call.get("summary") or submit_result))
+                        if capture:
+                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                        return final_text
+                    except Exception as exc:
+                        logger.warning("Fenced JSON submit_findings recovery failed: %s", exc)
             # Reject a plain-text end_turn once and nudge the model to call
             # submit_findings instead, if it never has. Confirmed 2026-07-22
             # round 7: RCA specialist finishes investigating but responds with

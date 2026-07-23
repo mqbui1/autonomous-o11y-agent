@@ -246,6 +246,7 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
     # Convert Bedrock-style messages to OpenAI chat format
     chat = [{"role": "system", "content": system}]
     has_garbled_submit = False
+    submit_findings_called = False
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content", [])
@@ -271,12 +272,17 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
                     continue
                 tu = c["toolUse"]
                 if tu.get("name") == "submit_findings":
+                    submit_findings_called = True
                     inp = tu.get("input", {}) or {}
                     fields_to_check = [inp.get("summary", "")]
                     for issue in inp.get("issues", []) or []:
                         if isinstance(issue, dict):
                             fields_to_check.append(issue.get("description", ""))
                             fields_to_check.append(issue.get("recommendation", ""))
+                    # Fields are normally strings, but the model sometimes passes a
+                    # list/dict instead (same malformation class as tools/findings.py
+                    # defends against live) — coerce so this check doesn't crash on it.
+                    fields_to_check = [t if isinstance(t, str) else json.dumps(t) for t in fields_to_check]
                     if any(_is_garbled_submit_findings(t) for t in fields_to_check):
                         has_garbled_submit = True
                 tool_calls.append(f"[tool_call:{tu.get('name', '')}] " + json.dumps(tu.get("input", {})))
@@ -286,6 +292,17 @@ def _from_conversation_file(path: pathlib.Path) -> list[dict]:
 
     if has_garbled_submit:
         return []  # skip whole example — don't train the model to reproduce this corruption
+
+    # If submit_findings was an available tool but the model never actually invoked
+    # it (narrated the intended call as plain text/JSON instead, or just rambled —
+    # confirmed 2026-07-23 root cause of recurring "rambling scratchpad" specialist
+    # output, e.g. logs: "Let's call `get_non_critical_errors` now."), don't train
+    # on it. Unlike _from_detail_file, this path never applied approve/reject labels
+    # at all, so these bad conversations were being included at full weight in every
+    # fine-tune — reinforcing the exact behavior we don't want.
+    tool_names = record.get("tool_names") or []
+    if "submit_findings" in tool_names and not submit_findings_called:
+        return []
 
     if len(chat) < 3:  # system + at least one exchange
         return []
