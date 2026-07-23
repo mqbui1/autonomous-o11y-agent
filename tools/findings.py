@@ -53,7 +53,13 @@ def _clean_findings_text(text: str, fallback: str = "") -> str:
         if m:
             return m.group(1).strip()
         return fallback or "[Malformed specialist output — raw JSON leaked into this field]"
-    return _trim_truncated_tail(cleaned)
+    trimmed = _trim_truncated_tail(cleaned)
+    # A genuinely empty result (e.g. the model gave up after a blank-summary retry
+    # without producing anything at all) is just as unusable as a JSON leak — apply
+    # the same fallback instead of silently persisting an empty field. Confirmed
+    # 2026-07-23: db specialist's second submit_findings attempt after the blank-
+    # summary nudge returned a fully empty end_turn, leaving summary="" in the report.
+    return trimmed or fallback
 
 
 @dataclass
@@ -172,6 +178,31 @@ SUBMIT_SCHEMA = {
 }
 
 
+def _split_malformed_summary_issues(items: Any) -> tuple[str, list]:
+    """
+    Handle the local fine-tuned model's most common submit_findings malformation:
+    passing summary+issues combined under a single non-schema `summary_issues` list
+    kwarg instead of separate `summary` (str) and `issues` (list[dict]) params.
+    Confirmed 2026-07-23 (governance/rum/synthetics): observed shapes include
+    [str], [{}, str], and [issue_dict, ...] (sometimes using "details" instead of
+    "description"). This is why the blank-summary retry nudge didn't help — the
+    model repeats the same wrong parameter shape on retry, just with different text.
+    """
+    if not isinstance(items, list):
+        return "", []
+    summary_parts: list[str] = []
+    extra_issues: list = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            summary_parts.append(item.strip())
+        elif isinstance(item, dict) and item:
+            if not item.get("description") and item.get("details"):
+                details = item["details"]
+                item = {**item, "description": details if isinstance(details, str) else json.dumps(details)}
+            extra_issues.append(item)
+    return " ".join(summary_parts), extra_issues
+
+
 def make_submit_fn(collector: dict, domain: str):
     """
     Return a submit_findings callable that stores structured findings in collector[domain].
@@ -188,6 +219,11 @@ def make_submit_fn(collector: dict, domain: str):
         actions_taken: list = None,
         **kwargs,  # absorb extra fields the model may pass
     ) -> str:
+        extra_summary, extra_issues = _split_malformed_summary_issues(kwargs.pop("summary_issues", None))
+        if not str(summary or "").strip() and extra_summary:
+            summary = extra_summary
+        if not issues and extra_issues:
+            issues = extra_issues
         parsed_issues = []
         for i in (issues or []):
             if isinstance(i, dict):
