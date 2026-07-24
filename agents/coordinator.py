@@ -18,6 +18,7 @@ run_incident_rca(config, alert):
     Triggered by streaming critical alerts — runs targeted RCA for a specific incident.
 """
 
+import json
 import logging
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -156,6 +157,10 @@ def run_assessment(
                 logger.error("Specialist '%s' failed: %s", name, exc, exc_info=True)
             if _update_progress:
                 _update_progress("specialists", len(findings), name=name)
+
+    # Backfill services_active from ground-truth tool queries where the model
+    # left it empty despite a successful, structured submit_findings call.
+    _backfill_services_active(config, findings)
 
     # Deduplicate issues across specialists before synthesis/save
     _dedup_cross_specialist_issues(findings)
@@ -324,12 +329,17 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
         if issue.severity == "critical"
     ]
 
-    # Silent services appearing in multiple domain reports
-    all_silent: set[str] = set()
+    # "Silent" means something different per domain (no APM spans vs. no log
+    # lines vs. no synthetic test coverage) — attribute each service to the
+    # domain(s) that flagged it instead of a single unlabeled bucket, which
+    # previously read "no telemetry" even when the service had plenty of
+    # telemetry in other domains (e.g. logs-silent but APM-active).
+    silent_domains: dict[str, set[str]] = defaultdict(set)
     for f in findings.values():
-        all_silent.update(f.services_silent)
+        for svc in f.services_silent:
+            silent_domains[svc].add(f.domain)
 
-    if not cross_cutting and not critical:
+    if not cross_cutting and not critical and not silent_domains:
         return ""
 
     lines = ["## Cross-Domain Analysis\n"]
@@ -347,11 +357,10 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
             svc_tag = f" [{issue.service}]" if issue.service else ""
             lines.append(f"- [{domain}]{svc_tag} {issue.description}")
 
-    if all_silent:
-        lines.append(
-            f"\n**All silent services (no telemetry):** "
-            + ", ".join(f"`{s}`" for s in sorted(all_silent))
-        )
+    if silent_domains:
+        lines.append("\n**Services flagged silent by at least one domain:**")
+        for svc, domains in sorted(silent_domains.items()):
+            lines.append(f"- `{svc}`: silent per {', '.join(sorted(domains))}")
 
     return "\n".join(lines)
 
@@ -533,6 +542,127 @@ def _format_findings_for_custom_prompt(
     return "\n".join(parts)
 
 
+# Domains where "services_active" means the same generic thing: services
+# currently emitting APM spans. RUM has its own distinct concept (frontend
+# apps with RUM session data), handled separately. Logs and synthetics don't
+# report services_active at all (their task is services_silent only — see
+# the dedicated cross-referencing functions below). Governance/detector/
+# performance don't have a well-defined "active services" concept at all.
+_GENERIC_APM_DOMAINS = {"health", "instrumentation", "db", "rca"}
+
+
+def _ground_truth_active_services(environment: str) -> list[str]:
+    """Query real APM span topology directly, bypassing the LLM entirely."""
+    try:
+        from tools.rca_tools import get_service_topology
+        data = json.loads(get_service_topology(environment, lookback_minutes=60))
+        return sorted({
+            s["serviceName"] for s in data.get("services", [])
+            if s.get("callCount", 0) > 0
+        })
+    except Exception:
+        logger.warning("Ground-truth topology query failed", exc_info=True)
+        return []
+
+
+def _ground_truth_active_rum_apps() -> list[str]:
+    """Query real RUM app data directly, bypassing the LLM entirely."""
+    try:
+        from tools.rum_analyzer import list_rum_apps
+        data = json.loads(list_rum_apps())
+        if not data.get("configured"):
+            return []
+        return sorted({a["name"] for a in data.get("apps", []) if a.get("name")})
+    except Exception:
+        logger.warning("Ground-truth RUM app query failed", exc_info=True)
+        return []
+
+
+def _ground_truth_silent_log_services(environment: str, active_services: list[str]) -> list[str]:
+    """
+    Query real per-service log volume directly, bypassing the LLM entirely.
+
+    Unlike the general services_silent case (no ground truth exists — see
+    _backfill_services_active's docstring), "silent" is well-defined for logs
+    specifically: an APM-active service (real ground truth from topology)
+    that emitted zero log lines in the same window. Cross-referencing those
+    two real, independent signals gives a genuine ground truth.
+    """
+    if not active_services:
+        return []
+    try:
+        from tools.log_analyzer import _service_log_volumes
+        volumes = _service_log_volumes(hours=24)
+        return sorted(s for s in active_services if volumes.get(s, 0) <= 0)
+    except Exception:
+        logger.warning("Ground-truth log volume query failed", exc_info=True)
+        return []
+
+
+def _ground_truth_silent_synthetics_services(environment: str, active_services: list[str]) -> list[str]:
+    """
+    Query real synthetics coverage directly, bypassing the LLM entirely.
+
+    get_synthetics_coverage_gaps() is deterministic given its `services` input —
+    the model just has to supply the right service list, which is exactly the
+    same real ground truth _ground_truth_active_services() already provides.
+    """
+    if not active_services:
+        return []
+    try:
+        from tools.synthetics_tools import get_synthetics_coverage_gaps
+        data = json.loads(get_synthetics_coverage_gaps(active_services, environment))
+        return sorted(data.get("services_with_no_synthetics", []))
+    except Exception:
+        logger.warning("Ground-truth synthetics coverage query failed", exc_info=True)
+        return []
+
+
+def _backfill_services_active(config: AgentConfig, findings: dict[str, SpecialistFindings]) -> None:
+    """
+    Confirmed 2026-07-24 (isolated live validation): the local fine-tuned model
+    unreliably populates services_active on submit_findings even when it has
+    real telemetry — e.g. the DB specialist's own prose reported "19 active
+    service instruments" with real request/error counts, but its structured
+    services_active field was left []. That made the exec-summary table show
+    "NO DATA" for domains with genuine findings, and could falsely trip
+    _is_convergent_blackout(). Backfill services_active from a direct,
+    code-only query of real APM/RUM data for domains where "active services"
+    is a generic, unambiguous concept — never overwrites a non-empty
+    model-reported list (the model's list is trusted when present).
+
+    services_silent is generally NOT backfilled: there's no reliable
+    ground-truth source for "expected but silent" services in most domains
+    (no static service registry, and span-based queries structurally can't
+    surface a service with zero telemetry — it just never appears in the
+    query results at all, indistinguishable from "never checked for it").
+    The one exception is "logs": an APM-active service with zero log volume
+    IS a genuine, derivable ground truth (see _ground_truth_silent_log_services).
+    """
+    generic_active: list[str] | None = None
+    rum_active: list[str] | None = None
+    for name, f in findings.items():
+        if not f.services_active:
+            if name in _GENERIC_APM_DOMAINS:
+                if generic_active is None:
+                    generic_active = _ground_truth_active_services(config.environment)
+                f.services_active = generic_active
+            elif name == "rum":
+                if rum_active is None:
+                    rum_active = _ground_truth_active_rum_apps()
+                f.services_active = rum_active
+
+        if name == "logs" and not f.services_silent:
+            if generic_active is None:
+                generic_active = _ground_truth_active_services(config.environment)
+            f.services_silent = _ground_truth_silent_log_services(config.environment, generic_active)
+
+        if name == "synthetics" and not f.services_silent:
+            if generic_active is None:
+                generic_active = _ground_truth_active_services(config.environment)
+            f.services_silent = _ground_truth_silent_synthetics_services(config.environment, generic_active)
+
+
 def _is_convergent_blackout(findings: dict[str, SpecialistFindings]) -> bool:
     """
     True when the assessment is a total blackout — essentially all specialists
@@ -541,9 +671,22 @@ def _is_convergent_blackout(findings: dict[str, SpecialistFindings]) -> bool:
     Criteria (both must hold):
       1. At least 7 of 10 specialists have services_active == 0 (or None)
       2. Every specialist with an instrumentation_score reports <= 20
+
+    Only specialists that actually called submit_findings successfully
+    (f.structured) count toward this signal. A specialist that fell back to
+    a raw_text summary (model never called submit_findings, or crashed) also
+    has services_active == [] by default — but that's an output-quality
+    failure, not evidence of a real telemetry blackout. Confirmed 2026-07-23:
+    a run where 6/10 specialists degraded to raw-text fallback falsely
+    triggered this check, mislabeling the report as "convergent blackout
+    detected" and (via _fast_blackout_synthesis) silently dropping any
+    custom --prompt question instead of surfacing the real problem.
     """
-    zero_active = sum(1 for f in findings.values() if not f.services_active)
-    scored = [f.instrumentation_score for f in findings.values() if f.instrumentation_score is not None]
+    structured = [f for f in findings.values() if f.structured]
+    if len(structured) < 7:
+        return False
+    zero_active = sum(1 for f in structured if not f.services_active)
+    scored = [f.instrumentation_score for f in structured if f.instrumentation_score is not None]
     low_scores = all(s <= 20 for s in scored) if scored else True
     return zero_active >= 7 and low_scores
 

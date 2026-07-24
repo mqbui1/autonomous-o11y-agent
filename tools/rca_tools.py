@@ -337,7 +337,9 @@ def get_service_topology(environment: str, lookback_minutes: int = 60) -> str:
             out: dict[str, float] = {}
             for tsid, vals in result["streams"].items():
                 svc = result["metadata"].get(tsid, {}).get("sf_service", "unknown")
-                out[svc] = fn(out.get(svc, 0), fn(vals)) if vals else out.get(svc, 0)
+                if not vals:
+                    continue
+                out[svc] = fn([out[svc], fn(vals)]) if svc in out else fn(vals)
             return out
 
         err_by_svc = _agg(err_r)

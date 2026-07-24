@@ -90,6 +90,13 @@ class SpecialistFindings:
     metrics: dict[str, Any] = field(default_factory=dict)
     actions_taken: list[str] = field(default_factory=list)  # audit trail of changes made
     raw_text: str = ""   # full prose from run_agent preserved here
+    # True only when the specialist actually called submit_findings successfully.
+    # Every agents/*.py module falls back to a raw_text[:500] summary (services_active
+    # left at its [] default) when the model never calls submit_findings — that fallback
+    # is indistinguishable from a genuine "zero active services" finding unless callers
+    # check this flag. Added 2026-07-23 to fix coordinator._is_convergent_blackout()
+    # falsely triggering on output-quality failures instead of real telemetry blackouts.
+    structured: bool = False
 
 
 SUBMIT_SCHEMA = {
@@ -244,14 +251,24 @@ def make_submit_fn(collector: dict, domain: str):
                 issue = Issue(**filtered)
             else:
                 issue = i
-            issue.description = _clean_findings_text(
-                str(issue.description) if issue.description else "",
-                fallback="[Malformed specialist output for this finding]",
-            )
-            issue.recommendation = (
-                _clean_findings_text(str(issue.recommendation) if issue.recommendation else "")
-                or "No specific recommendation provided."
-            )
+            raw_description = str(issue.description) if issue.description else ""
+            raw_recommendation = str(issue.recommendation) if issue.recommendation else ""
+            # Confirmed 2026-07-23 (round 8 live validation): health/db/synthetics
+            # specialists sometimes omit "description" entirely but put the actual
+            # finding text in "recommendation". Previously this showed the generic
+            # "[Malformed specialist output for this finding]" placeholder even
+            # though real, usable content was present — salvage it instead.
+            if not raw_description.strip() and raw_recommendation.strip():
+                issue.description = _clean_findings_text(raw_recommendation)
+                issue.recommendation = "No specific recommendation provided."
+            else:
+                issue.description = _clean_findings_text(
+                    raw_description,
+                    fallback="[Malformed specialist output for this finding]",
+                )
+                issue.recommendation = (
+                    _clean_findings_text(raw_recommendation) or "No specific recommendation provided."
+                )
             parsed_issues.append(issue)
         # summary is normally a string, but the model occasionally passes a dict
         # (confirmed 2026-07-22 round 7: "Tool submit_findings failed: expected
@@ -267,6 +284,7 @@ def make_submit_fn(collector: dict, domain: str):
             issues=parsed_issues,
             metrics=metrics or {},
             actions_taken=actions_taken or [],
+            structured=True,
         )
         return "Findings recorded. Assessment complete."
 

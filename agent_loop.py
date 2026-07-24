@@ -32,6 +32,14 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 _TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>.*", re.DOTALL)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
 _TIMEOUT_RE = re.compile(r"timed out after \d+ seconds", re.IGNORECASE)
+# Confirmed 2026-07-23 (round 8 live validation): the local fine-tuned model
+# sometimes emits a stray Misc Symbols/Dingbats character (e.g. U+2696 BALANCE
+# SCALE "⚖") where a bullet point or newline was intended, producing prose
+# like "...for flagd⚖ Enable db.statement.capture⚖ The APM traces...". Replace
+# with a sentence break rather than leaving the garbled glyph in the report.
+_STRAY_SYMBOL_RE = re.compile(r"[\u2600-\u27bf]")
+_DOUBLE_PUNCT_RE = re.compile(r"\.\s*\.")
+_MULTI_SPACE_RE = re.compile(r" {2,}")
 
 
 def _extract_fake_tool_call_summary(text: str) -> str | None:
@@ -93,6 +101,9 @@ def _sanitize_final_text(text: str) -> str:
     cleaned = _TOOL_CALL_RE.sub("", text)
     cleaned = _TOOL_CALL_UNCLOSED_RE.sub("", cleaned)
     cleaned = _CJK_RE.sub("", cleaned)
+    cleaned = _STRAY_SYMBOL_RE.sub(". ", cleaned)
+    cleaned = _DOUBLE_PUNCT_RE.sub(".", cleaned)
+    cleaned = _MULTI_SPACE_RE.sub(" ", cleaned)
     cleaned = cleaned.strip()
     fake_summary = _extract_fake_tool_call_summary(cleaned)
     if fake_summary:
@@ -361,10 +372,34 @@ def _execute_parallel(
     return results, id_to_result
 
 
+_PLACEHOLDER_ARG_RE = re.compile(r"^<[^<>]{2,80}>$")
+
+
+def _find_placeholder_arg(inputs: dict) -> str | None:
+    """Detect the model echoing a schema hint/placeholder string back as a
+    literal argument value instead of substituting a real value from a prior
+    tool result. Confirmed 2026-07-23 (round 8 live validation): synthetics
+    specialist called get_test_results(test_id='<test_id_value_from_previous_call>')
+    three times in a row — the literal placeholder text can never return real
+    data, wasting turns and a network call each time.
+    """
+    for key, value in inputs.items():
+        if isinstance(value, str) and _PLACEHOLDER_ARG_RE.match(value.strip()):
+            return key
+    return None
+
+
 def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
     fn = tool_fns.get(name)
     if fn is None:
         return f"Unknown tool: {name}"
+    placeholder_key = _find_placeholder_arg(inputs)
+    if placeholder_key is not None:
+        return (
+            f"Tool {name} error: argument '{placeholder_key}'={inputs[placeholder_key]!r} "
+            "looks like an unfilled placeholder, not a real value. Use the actual "
+            "value from a previous tool result's output instead."
+        )
     try:
         import inspect
         if inputs:
