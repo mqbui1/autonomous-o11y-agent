@@ -250,6 +250,38 @@ def analyze_log_patterns(service: str = "", hours: int = 4) -> str:
         return f"Error analyzing log patterns: {e}"
 
 
+def _service_log_volumes(service: str = "", hours: int = 24) -> dict[str, float]:
+    """
+    Query per-service log line counts for the last `hours` via SignalFlow.
+
+    Extracted from get_log_volume so callers needing raw counts (e.g. a
+    services_silent ground-truth check) don't have to parse its markdown text.
+    """
+    cfg = get_config()
+    now = datetime.now(timezone.utc)
+    start_ms = int((now - timedelta(hours=hours)).timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+
+    filter_clause = f'filter("deployment.environment", "{cfg.environment}")'
+    if service:
+        filter_clause += f'.and(filter("service.name", "{service}"))'
+
+    program = (
+        f"data('sf.org.numLogLines', {filter_clause})"
+        f".sum(by=['service.name']).publish()"
+    )
+
+    result = _signalflow(program, start_ms, end_ms)
+    raw_series = result.get("series", {})
+    raw_meta = result.get("meta", {})
+
+    series: dict[str, float] = {tsid: sum(vals) for tsid, vals in raw_series.items()}
+    meta: dict[str, str] = {
+        tsid: props.get("service.name", tsid) for tsid, props in raw_meta.items()
+    }
+    return {meta.get(tsid, tsid): count for tsid, count in series.items()}
+
+
 def get_log_volume(service: str = "", hours: int = 24) -> str:
     """
     Get log ingestion volume per service over a time window.
@@ -263,37 +295,13 @@ def get_log_volume(service: str = "", hours: int = 24) -> str:
         hours: Number of hours to look back (default: 24).
     """
     cfg = get_config()
-    now = datetime.now(timezone.utc)
-    start_ms = int((now - timedelta(hours=hours)).timestamp() * 1000)
-    end_ms = int(now.timestamp() * 1000)
-
-    filter_clause = f'filter("deployment.environment", "{cfg.environment}")'
-    if service:
-        filter_clause += f'.and(filter("service.name", "{service}"))'
-
-    # SignalFlow: count log lines grouped by service
-    program = (
-        f"data('sf.org.numLogLines', {filter_clause})"
-        f".sum(by=['service.name']).publish()"
-    )
 
     try:
-        result = _signalflow(program, start_ms, end_ms)
-        raw_series = result.get("series", {})
-        raw_meta = result.get("meta", {})
+        named = _service_log_volumes(service, hours)
 
-        # Sum each tsId's data points into a single total count
-        series: dict[str, float] = {tsid: sum(vals) for tsid, vals in raw_series.items()}
-
-        # Map tsid → service name via metadata properties
-        meta: dict[str, str] = {
-            tsid: props.get("service.name", tsid) for tsid, props in raw_meta.items()
-        }
-
-        if not series:
+        if not named:
             return f"No log volume data found for environment={cfg.environment} in the last {hours}h."
 
-        named = {meta.get(tsid, tsid): count for tsid, count in series.items()}
         top = sorted(named.items(), key=lambda x: x[1], reverse=True)
 
         lines = [f"## Log Volume — last {hours}h (environment={cfg.environment})\n"]
