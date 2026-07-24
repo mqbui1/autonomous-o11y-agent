@@ -111,6 +111,15 @@ def _sanitize_final_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _call_signature(name: str, inputs: dict) -> str:
+    """Stable string key for an exact (tool name, arguments) pair, used to
+    detect the model repeating an identical call it already made this run."""
+    try:
+        return name + "|" + json.dumps(inputs, sort_keys=True, default=str)
+    except Exception:
+        return name + "|" + str(inputs)
+
+
 def _converse_with_retry(
     provider, system_prompt: str, messages: list, native_tools: list, max_attempts: int = 3,
     force_tool: str = None,
@@ -176,6 +185,7 @@ def run_agent(
     blank_submit_retried = False
     end_turn_retried = False
     already_timed_out_tools: set = set()
+    seen_call_signatures: set = set()
     for turn in range(max_turns):
         # Force submit_findings (grammar-enforced by the provider) on the final turn
         # if it hasn't been called yet. Confirmed 2026-07-21/22: detector/synthetics/
@@ -275,14 +285,38 @@ def run_agent(
             # following on the local fine-tuned model). Confirmed 2026-07-23: detector
             # specialist retry-looping provision_detectors after each 180s/480s timeout,
             # burning through specialist_max_turns with nothing to show.
-            to_skip = [tu for tu in tool_uses if tu["name"] in already_timed_out_tools]
-            to_run = [tu for tu in tool_uses if tu["name"] not in already_timed_out_tools]
+            #
+            # Separately, confirmed 2026-07-24: the detector specialist cycles
+            # provision_detectors/audit_detectors/retune_detectors with the exact
+            # same (empty) arguments turn after turn without ever incorporating the
+            # prior result — not a timeout, each call genuinely succeeds in 1-2min,
+            # it just never stops re-running the same tool with the same args. That
+            # alone stretched a 12-turn run to ~8 minutes of real subprocess work.
+            # Skip any exact-duplicate (name, args) call rather than paying for
+            # another live re-run of identical work.
+            to_skip: list[tuple[dict, str]] = []
+            to_run: list[dict] = []
+            for tu in tool_uses:
+                if tu["name"] in already_timed_out_tools:
+                    to_skip.append((tu, (
+                        f"Tool {tu['name']} already timed out earlier this run — do NOT "
+                        "call it again. Call submit_findings now with whatever you have."
+                    )))
+                    continue
+                if tu["name"] != "submit_findings":
+                    sig = _call_signature(tu["name"], tu.get("input", {}))
+                    if sig in seen_call_signatures:
+                        to_skip.append((tu, (
+                            f"You already called {tu['name']} with these exact arguments "
+                            "earlier this run — the result will be identical. Use the "
+                            "existing result, try different arguments, or call "
+                            "submit_findings now instead of repeating this call."
+                        )))
+                        continue
+                    seen_call_signatures.add(sig)
+                to_run.append(tu)
             results, id_to_result = _execute_parallel(to_run, tool_fns, provider) if to_run else ([], {})
-            for tu in to_skip:
-                skip_msg = (
-                    f"Tool {tu['name']} already timed out earlier this run — do NOT "
-                    "call it again. Call submit_findings now with whatever you have."
-                )
+            for tu, skip_msg in to_skip:
                 id_to_result[tu["id"]] = skip_msg
                 results.append(provider.format_tool_result(tu["id"], skip_msg))
             for tu in to_run:
