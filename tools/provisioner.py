@@ -2,7 +2,35 @@
 Detector provisioner tool — wraps auto-detector-provisioner/provision.py.
 """
 
+from pathlib import Path
+
 from ._runner import get_config, run, summarise
+
+_SCRIPT = "provision.py"
+
+# provision.py writes baseline cache files (data/baselines/<env>__<service>.json) and
+# state (data/provisioned_state.json) relative to its own process cwd. deploy/docker-
+# compose.yml bind-mounts cfg.provisioner_path READ-ONLY (it's a sibling project's
+# source tree), so any service without an already-cached baseline crashes with
+# "OSError: [Errno 30] Read-only file system: 'data/baselines/...'" — an UNCAUGHT
+# exception in provision.py that aborts the whole run on the first affected service.
+# Confirmed 2026-07-25 via direct reproduction (docker exec + manual provision.py
+# invocation): this has been silently killing detector provisioning on every call for
+# any service not already provisioned, hidden from both the model and log monitoring
+# because tools/_runner.py's summarise() truncates stderr to 2000 chars — the discovery-
+# phase logging that precedes the traceback in provision.py's own stderr output eats up
+# that whole budget before the actual error ever appears. Same fix as tools/governance.py:
+# run from a writable cwd, passing the script itself as an absolute path.
+_WRITABLE_CWD = Path.home() / ".o11y-agent" / "provisioner"
+
+
+def _script_path(cfg) -> str:
+    return str(cfg.provisioner_path / _SCRIPT)
+
+
+def _writable_cwd() -> Path:
+    _WRITABLE_CWD.mkdir(parents=True, exist_ok=True)
+    return _WRITABLE_CWD
 
 
 def provision_detectors(
@@ -37,7 +65,7 @@ def provision_detectors(
     """
     cfg = get_config()
     cmd = [
-        "provision.py",
+        _script_path(cfg),
         "--realm", cfg.realm,
         "--token", cfg.token,
         "--environment", cfg.environment,
@@ -53,7 +81,7 @@ def provision_detectors(
     if reconcile:
         cmd.append("--reconcile")
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path, timeout=cfg.provision_timeout)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd(), timeout=cfg.provision_timeout)
     return summarise(rc, stdout, stderr, "provision_detectors")
 
 
@@ -68,7 +96,7 @@ def retune_detectors(service: str = "") -> str:
     """
     cfg = get_config()
     cmd = [
-        "provision.py",
+        _script_path(cfg),
         "--realm", cfg.realm,
         "--token", cfg.token,
         "--environment", cfg.environment,
@@ -79,7 +107,7 @@ def retune_detectors(service: str = "") -> str:
     if service or cfg.service:
         cmd.extend(["--service", service or cfg.service])
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path, timeout=cfg.provision_timeout)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd(), timeout=cfg.provision_timeout)
     return summarise(rc, stdout, stderr, "retune_detectors")
 
 
@@ -94,7 +122,7 @@ def audit_detectors(service: str = "") -> str:
     """
     cfg = get_config()
     cmd = [
-        "provision.py",
+        _script_path(cfg),
         "--realm", cfg.realm,
         "--token", cfg.token,
         "--environment", cfg.environment,
@@ -103,7 +131,7 @@ def audit_detectors(service: str = "") -> str:
     if service or cfg.service:
         cmd.extend(["--service", service or cfg.service])
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.provisioner_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "audit_detectors")
 
 
