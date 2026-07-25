@@ -2,7 +2,30 @@
 Cardinality governance tool — wraps o11y-usage-governance/cardinality_governance.py.
 """
 
+from pathlib import Path
+
 from ._runner import get_config, run, batch_run, summarise
+
+_SCRIPT = "cardinality_governance.py"
+
+# cardinality_governance.py writes its state (`cardinality_state.db`) and a
+# `reports/` directory relative to its own process cwd. deploy/docker-compose.yml
+# bind-mounts cfg.governance_path READ-ONLY (it's a sibling project's source tree),
+# so running with cwd=cfg.governance_path fails with
+# "sqlite3.OperationalError: attempt to write a readonly database" — confirmed
+# 2026-07-25 via live validation (fix_cardinality_report). Run from a writable
+# directory instead, passing the script itself as an absolute path so it can
+# still be found outside its own source tree.
+_WRITABLE_CWD = Path.home() / ".o11y-agent" / "governance"
+
+
+def _script_path(cfg) -> str:
+    return str(cfg.governance_path / _SCRIPT)
+
+
+def _writable_cwd() -> Path:
+    _WRITABLE_CWD.mkdir(parents=True, exist_ok=True)
+    return _WRITABLE_CWD
 
 
 def scan_cardinality(top: int = 20, verbose: bool = False) -> str:
@@ -21,11 +44,11 @@ def scan_cardinality(top: int = 20, verbose: bool = False) -> str:
         verbose: If True, include all severity levels including LOW.
     """
     cfg = get_config()
-    cmd = ["cardinality_governance.py", "scan", "--top", str(top)]
+    cmd = [_script_path(cfg), "scan", "--top", str(top)]
     if verbose:
         cmd.append("--verbose")
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.governance_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "scan_cardinality")
 
 
@@ -43,12 +66,12 @@ def scan_cardinality_anomalies(ratio: float = 2.0, days: int = 7) -> str:
     """
     cfg = get_config()
     cmd = [
-        "cardinality_governance.py", "anomaly-scan",
+        _script_path(cfg), "anomaly-scan",
         "--ratio", str(ratio),
         "--days", str(days),
     ]
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.governance_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "scan_cardinality_anomalies")
 
 
@@ -71,14 +94,14 @@ def fix_cardinality_report(top: int = 20, no_ai: bool = False) -> str:
     """
     cfg = get_config()
     cmd = [
-        "cardinality_governance.py", "report",
+        _script_path(cfg), "report",
         "--top", str(top),
         "--format", "md",
     ]
     if no_ai:
         cmd.append("--no-ai")
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.governance_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "fix_cardinality_report")
 
 
@@ -92,9 +115,9 @@ def drilldown_dimension(dimension: str) -> str:
         dimension: Dimension name to drill down on (e.g. "server.address", "request_id").
     """
     cfg = get_config()
-    cmd = ["cardinality_governance.py", "drilldown", "--dimension", dimension]
+    cmd = [_script_path(cfg), "drilldown", "--dimension", dimension]
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.governance_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "drilldown_dimension")
 
 
@@ -125,15 +148,16 @@ def full_cardinality_scan(top: int = 20, ratio: float = 2.0, days: int = 7) -> s
         days: Baseline window in days for anomaly detection (default: 7).
     """
     cfg = get_config()
+    writable_cwd = _writable_cwd()
     tasks = [
-        (["cardinality_governance.py", "scan", "--top", str(top)], cfg.governance_path),
+        ([_script_path(cfg), "scan", "--top", str(top)], writable_cwd),
         (
             [
-                "cardinality_governance.py", "anomaly-scan",
+                _script_path(cfg), "anomaly-scan",
                 "--ratio", str(ratio),
                 "--days", str(days),
             ],
-            cfg.governance_path,
+            writable_cwd,
         ),
     ]
     results = batch_run(tasks)
@@ -157,13 +181,13 @@ def scan_trace_volume(lookback_hours: float = 1.0) -> str:
     """
     cfg = get_config()
     cmd = [
-        "cardinality_governance.py", "trace-scan",
+        _script_path(cfg), "trace-scan",
         "--lookback", str(lookback_hours),
     ]
     if cfg.environment:
         cmd.extend(["--environment", cfg.environment])
 
-    rc, stdout, stderr = run(cmd, cwd=cfg.governance_path)
+    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
     return summarise(rc, stdout, stderr, "scan_trace_volume")
 
 
