@@ -281,8 +281,14 @@ def make_submit_fn(collector: dict, domain: str):
                 filtered["domain"] = filtered.get("domain") or domain
                 filtered["description"] = filtered.get("description") or ""
                 issue = Issue(**filtered)
-            else:
+            elif isinstance(i, Issue):
                 issue = i
+            else:
+                # Model sometimes emits `issues` as a list of plain strings instead
+                # of dicts — confirmed 2026-07-25 live: crashed downstream on
+                # `issue.description` with 'str' object has no attribute 'description'.
+                # Wrap it as a minimal Issue instead of discarding/crashing.
+                issue = Issue(severity="medium", domain=domain, description=str(i))
             raw_description = str(issue.description) if issue.description else ""
             raw_recommendation = str(issue.recommendation) if issue.recommendation else ""
             # Confirmed 2026-07-23 (round 8 live validation): health/db/synthetics
