@@ -18,8 +18,11 @@ data/
 training/models/
 training/output/adapters/
 training/output/adapters_iter200_backup/
+training/output/adapters_round8_backup/
 training/output/fused-3b/
 training/output/fused-3b_iter200_backup/
+training/output/fused-3b_round8_backup/
+training/output/Modelfile_round8_backup
 training/output/mlx-data/
 training/output/*.gguf
 fused_model/
