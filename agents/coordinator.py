@@ -414,7 +414,7 @@ def _build_detailed_findings(findings: dict[str, SpecialistFindings]) -> str:
             for issue in sorted(f.issues, key=lambda i: _SEV_ORDER.get(i.severity, 9)):
                 svc = f" [{issue.service}]" if issue.service else ""
                 lines.append(
-                    f"- **[{issue.severity.upper()}]**{svc} {issue.description} "
+                    f"- **[{str(issue.severity or 'medium').upper()}]**{svc} {issue.description} "
                     f"→ {issue.recommendation}"
                 )
         if f.metrics:
