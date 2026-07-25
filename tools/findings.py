@@ -299,9 +299,21 @@ def make_submit_fn(collector: dict, domain: str):
         # string or bytes-like object, got 'dict'") — coerce defensively.
         if isinstance(summary, dict):
             summary = summary.get("text") or summary.get("summary") or json.dumps(summary)
+        malformed_marker = f"[{domain} specialist output malformed]"
+        cleaned_summary = _clean_findings_text(str(summary or ""), fallback=malformed_marker)
+        # If the top-level summary is unsalvageable but real issues were still
+        # parsed (confirmed 2026-07-25: health specialist submitted a blank/garbled
+        # summary but a genuine, non-empty issue list), synthesize a summary from
+        # the issues instead of showing the generic placeholder — better than
+        # discarding real findings just because the free-text summary field failed.
+        if cleaned_summary == malformed_marker and parsed_issues:
+            top = parsed_issues[0]
+            cleaned_summary = (
+                f"{len(parsed_issues)} issue(s) found. Top: {top.description[:200]}"
+            )
         collector[domain] = SpecialistFindings(
             domain=domain,
-            summary=_clean_findings_text(str(summary or ""), fallback=f"[{domain} specialist output malformed]"),
+            summary=cleaned_summary,
             services_active=_coerce_str_list(services_active),
             services_silent=_coerce_str_list(services_silent),
             instrumentation_score=instrumentation_score,
