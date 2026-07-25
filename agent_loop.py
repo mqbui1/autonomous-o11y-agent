@@ -208,8 +208,7 @@ def run_agent(
         t.get("toolSpec", {}).get("name") == "submit_findings" for t in tools
     )
     submit_findings_called = False
-    blank_submit_retried = False
-    end_turn_retried = False
+    blank_submit_retries = 0
     already_timed_out_tools: set = set()
     seen_call_signatures: set = set()
     for turn in range(max_turns):
@@ -269,14 +268,23 @@ def run_agent(
                         return final_text
                     except Exception as exc:
                         logger.warning("Bare JSON submit_findings recovery failed: %s", exc)
-            # Reject a plain-text end_turn once and nudge the model to call
+            # Reject a plain-text end_turn and nudge the model to call
             # submit_findings instead, if it never has. Confirmed 2026-07-22
             # round 7: RCA specialist finishes investigating but responds with
             # rambling scratchpad-style plain text ("Let's take action now: ...")
             # instead of calling submit_findings — the specialist's raw_text[:500]
             # fallback then truncates this mid-sentence in the final report.
-            if has_submit_tool and not submit_findings_called and not end_turn_retried and turns_remaining > 0:
-                end_turn_retried = True
+            # Was previously a one-shot retry (single nudge, then give up) — bumped
+            # to nudge on EVERY plain-text end_turn while turns remain (2026-07-25):
+            # confirmed live that detector/logs/synthetics specialists sometimes
+            # ramble ("Let's move forward with submit_findings now...") on the
+            # first end_turn, call an unrelated investigative tool instead of
+            # submit_findings on the next turn, then ramble again on a second
+            # end_turn — burning the single retry with nothing to show. Safe to
+            # nudge repeatedly since max_turns bounds the loop and force_tool
+            # (above) guarantees a real submit_findings call on the literal last
+            # turn regardless of how many plain-text end_turns preceded it.
+            if has_submit_tool and not submit_findings_called and turns_remaining > 0:
                 messages.append({
                     "role": "user",
                     "content": [{
@@ -398,15 +406,19 @@ def run_agent(
                         # ran, since this line executes first. Coerce the same way here.
                         raw_summary = raw_summary.get("text") or raw_summary.get("summary") or json.dumps(raw_summary)
                     submitted_summary = str(raw_summary or "").strip()
-                    # Reject a blank summary once and give the model a chance to
-                    # resubmit with real content, instead of silently falling through
-                    # to the tool's generic "Findings recorded." string. Confirmed
-                    # 2026-07-22 round 7: governance/synthetics call submit_findings
-                    # with summary="" (and often issues=[]) even after real, successful
-                    # tool investigation — the generic fallback masked this as if
-                    # nothing was wrong.
-                    if not submitted_summary and not blank_submit_retried and turns_remaining > 0:
-                        blank_submit_retried = True
+                    # Reject a blank summary and give the model a chance to resubmit
+                    # with real content, instead of silently falling through to the
+                    # tool's generic "Findings recorded." string. Confirmed 2026-07-22
+                    # round 7: governance/synthetics call submit_findings with summary=""
+                    # (and often issues=[]) even after real, successful tool
+                    # investigation — the generic fallback masked this as if nothing
+                    # was wrong. Bumped from 1 to 2 retries (2026-07-25): a single
+                    # retry still sometimes comes back blank a second time (db/
+                    # governance/health all observed doing this live) — a 2nd chance
+                    # is cheap relative to specialist_max_turns budget and gives real
+                    # content a better chance to surface before falling back.
+                    if not submitted_summary and blank_submit_retries < 2 and turns_remaining > 0:
+                        blank_submit_retries += 1
                         results = results + [{
                             "text": "[REMINDER: Your submit_findings call had an empty "
                                      "summary. Call submit_findings again with a non-empty "
