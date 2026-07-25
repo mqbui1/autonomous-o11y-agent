@@ -210,6 +210,30 @@ def _split_malformed_summary_issues(items: Any) -> tuple[str, list]:
     return " ".join(summary_parts), extra_issues
 
 
+def _coerce_str_list(items: Any) -> list[str]:
+    """Coerce services_active/services_silent/actions_taken to a list of plain
+    strings. Confirmed 2026-07-24: the detector specialist passed actions_taken
+    as a list of issue-shaped dicts instead of strings (schema says
+    items: {"type": "string"}) -- coordinator.py's ", ".join(f.actions_taken)
+    then crashed with "sequence item 0: expected str instance, dict found"
+    AFTER all 10 specialists had already run, discarding the entire assessment
+    (no detail JSON gets saved), not just this one domain's findings.
+    """
+    if not items:
+        return []
+    if not isinstance(items, list):
+        return [str(items)]
+    out = []
+    for item in items:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            out.append(item.get("description") or item.get("summary") or json.dumps(item))
+        else:
+            out.append(str(item))
+    return out
+
+
 def make_submit_fn(collector: dict, domain: str):
     """
     Return a submit_findings callable that stores structured findings in collector[domain].
@@ -278,12 +302,12 @@ def make_submit_fn(collector: dict, domain: str):
         collector[domain] = SpecialistFindings(
             domain=domain,
             summary=_clean_findings_text(str(summary or ""), fallback=f"[{domain} specialist output malformed]"),
-            services_active=services_active or [],
-            services_silent=services_silent or [],
+            services_active=_coerce_str_list(services_active),
+            services_silent=_coerce_str_list(services_silent),
             instrumentation_score=instrumentation_score,
             issues=parsed_issues,
             metrics=metrics or {},
-            actions_taken=actions_taken or [],
+            actions_taken=_coerce_str_list(actions_taken),
             structured=True,
         )
         return "Findings recorded. Assessment complete."

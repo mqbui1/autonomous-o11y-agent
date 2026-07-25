@@ -95,6 +95,32 @@ def _extract_fenced_json_submit_call(text: str) -> dict | None:
     return None
 
 
+_BARE_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _extract_bare_json_submit_call(text: str) -> dict | None:
+    """Detect an un-fenced JSON object describing submit_findings args, optionally
+    wrapped in a custom tag (e.g. `<json>{...}</json>`) instead of a real tool call.
+    Confirmed 2026-07-24: governance specialist emitted a raw JSON object using
+    "summary_issues" (not "summary"/"issues") as plain end_turn text with no code
+    fence at all -- _extract_fenced_json_submit_call requires ``` and never matched,
+    so the whole JSON blob leaked verbatim into the report as the "summary". Accepts
+    "summary_issues" too since make_submit_fn already normalizes that shape.
+    """
+    if not text:
+        return None
+    match = _BARE_JSON_OBJ_RE.search(text)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict) and ("summary" in data or "issues" in data or "summary_issues" in data):
+        return data
+    return None
+
+
 def _sanitize_final_text(text: str) -> str:
     if not text:
         return text
@@ -230,6 +256,19 @@ def run_agent(
                         return final_text
                     except Exception as exc:
                         logger.warning("Fenced JSON submit_findings recovery failed: %s", exc)
+            if has_submit_tool and not submit_findings_called:
+                bare_call = _extract_bare_json_submit_call(result["text"] or "")
+                submit_fn = tool_fns.get("submit_findings") if bare_call is not None else None
+                if submit_fn is not None:
+                    try:
+                        submit_result = submit_fn(**bare_call)
+                        submit_findings_called = True
+                        final_text = _sanitize_final_text(str(bare_call.get("summary") or submit_result))
+                        if capture:
+                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                        return final_text
+                    except Exception as exc:
+                        logger.warning("Bare JSON submit_findings recovery failed: %s", exc)
             # Reject a plain-text end_turn once and nudge the model to call
             # submit_findings instead, if it never has. Confirmed 2026-07-22
             # round 7: RCA specialist finishes investigating but responds with
@@ -350,7 +389,15 @@ def run_agent(
                 submit_result = id_to_result.get(submit_call["id"], "")
                 if not submit_result.lower().startswith(("tool ", "unknown tool")):
                     submit_findings_called = True
-                    submitted_summary = (submit_call.get("input", {}).get("summary") or "").strip()
+                    raw_summary = submit_call.get("input", {}).get("summary")
+                    if isinstance(raw_summary, dict):
+                        # Model sometimes passes summary as a nested dict instead of a
+                        # string. Confirmed 2026-07-24: this crashed the entire specialist
+                        # thread with "'dict' object has no attribute 'strip'" BEFORE
+                        # make_submit_fn's own dict-coercion logic (tools/findings.py) ever
+                        # ran, since this line executes first. Coerce the same way here.
+                        raw_summary = raw_summary.get("text") or raw_summary.get("summary") or json.dumps(raw_summary)
+                    submitted_summary = str(raw_summary or "").strip()
                     # Reject a blank summary once and give the model a chance to
                     # resubmit with real content, instead of silently falling through
                     # to the tool's generic "Findings recorded." string. Confirmed
