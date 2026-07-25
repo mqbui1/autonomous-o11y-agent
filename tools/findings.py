@@ -269,9 +269,17 @@ def make_submit_fn(collector: dict, domain: str):
                 # a partial (if imperfect) report.
                 known = {f.name for f in Issue.__dataclass_fields__.values()}
                 filtered = {k: v for k, v in i.items() if k in known}
-                filtered.setdefault("severity", "medium")
-                filtered.setdefault("domain", domain)
-                filtered.setdefault("description", "")
+                # Use `or` instead of setdefault: the model sometimes emits the key
+                # with an explicit null (`"severity": null`) rather than omitting it,
+                # which setdefault does NOT catch (key already present). Confirmed
+                # 2026-07-25: severity=None survived to coordinator.py's
+                # `issue.severity.upper()` and crashed the ENTIRE assessment run
+                # (AttributeError discarded all 10 specialists' findings, not just
+                # this one issue) — far worse than the malformed-placeholder cases
+                # this function already defends against.
+                filtered["severity"] = filtered.get("severity") or "medium"
+                filtered["domain"] = filtered.get("domain") or domain
+                filtered["description"] = filtered.get("description") or ""
                 issue = Issue(**filtered)
             else:
                 issue = i
