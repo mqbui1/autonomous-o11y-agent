@@ -24,6 +24,19 @@ _JSON_LEAK_START_RE = re.compile(r'^\s*"[a-z_]+"\s*,\s*\{')
 _DICT_KEY_RE = re.compile(r'"(severity|domain|description|recommendation|action_args|action_tool)"\s*:')
 _DESC_VALUE_RE = re.compile(r'"description"\s*:\s*"([^"]{10,300})"')
 _SENTENCE_END_RE = re.compile(r'[.!?]["\')]*\s')
+# Confirmed 2026-07-26 live: governance/other specialists sometimes submit a
+# benign "nothing wrong" statement (e.g. "No cardinality explosions detected.")
+# as a formal issues[] entry, complete with a backfilled default severity
+# ("medium") — it then shows up in the action plan as an actionable finding
+# even though it describes the ABSENCE of a problem. Only filter when there's
+# also no real recommendation attached (the generic placeholder), since a
+# genuine issue almost always comes with an actual fix suggestion — reduces
+# false-positive risk of dropping a real negative finding that happens to
+# start with "No ...".
+_NO_ISSUE_RE = re.compile(
+    r'^no\s+\S.*\b(detected|found|observed|identified|present)\b\.?\s*$',
+    re.IGNORECASE,
+)
 
 
 def _looks_like_json_leak(text: str) -> bool:
@@ -226,11 +239,16 @@ def _coerce_str_list(items: Any) -> list[str]:
     out = []
     for item in items:
         if isinstance(item, str):
-            out.append(item)
+            if item.strip():
+                out.append(item)
         elif isinstance(item, dict):
-            out.append(item.get("description") or item.get("summary") or json.dumps(item))
+            val = item.get("description") or item.get("summary") or json.dumps(item)
+            if str(val).strip():
+                out.append(val)
         else:
-            out.append(str(item))
+            val = str(item)
+            if val.strip():
+                out.append(val)
     return out
 
 
@@ -316,6 +334,11 @@ def make_submit_fn(collector: dict, domain: str):
                 issue.recommendation = (
                     _clean_findings_text(raw_recommendation) or "No specific recommendation provided."
                 )
+            if (
+                issue.recommendation == "No specific recommendation provided."
+                and _NO_ISSUE_RE.match(issue.description.strip())
+            ):
+                continue
             parsed_issues.append(issue)
         # summary is normally a string, but the model occasionally passes a dict
         # (confirmed 2026-07-22 round 7: "Tool submit_findings failed: expected

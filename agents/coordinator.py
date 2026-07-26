@@ -313,7 +313,8 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
             if issue.service:
                 service_domains[issue.service].add(domain)
         for svc in f.services_silent:
-            service_domains[svc].add(domain)
+            if svc:
+                service_domains[svc].add(domain)
 
     cross_cutting = {
         svc: sorted(domains)
@@ -337,7 +338,8 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
     silent_domains: dict[str, set[str]] = defaultdict(set)
     for f in findings.values():
         for svc in f.services_silent:
-            silent_domains[svc].add(f.domain)
+            if svc:
+                silent_domains[svc].add(f.domain)
 
     if not cross_cutting and not critical and not silent_domains:
         return ""
@@ -349,7 +351,10 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
             "**Services with issues across multiple domains (highest priority for synthesis):**"
         )
         for svc, domains in sorted(cross_cutting.items()):
-            lines.append(f"- `{svc}`: flagged by {', '.join(domains)}")
+            # No backticks — this text is rendered as plain text in the UI, not
+            # markdown, and leaks literal backtick characters if wrapped here
+            # (confirmed 2026-07-26 live).
+            lines.append(f"- {svc}: flagged by {', '.join(domains)}")
 
     if critical:
         lines.append("\n**Critical issues requiring immediate attention:**")
@@ -360,7 +365,7 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
     if silent_domains:
         lines.append("\n**Services flagged silent by at least one domain:**")
         for svc, domains in sorted(silent_domains.items()):
-            lines.append(f"- `{svc}`: silent per {', '.join(sorted(domains))}")
+            lines.append(f"- {svc}: silent per {', '.join(sorted(domains))}")
 
     return "\n".join(lines)
 
@@ -369,6 +374,24 @@ _DOMAIN_ORDER = ("health", "instrumentation", "governance", "detector", "logs", 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _SEV_STATUS = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
 _NO_RECOMMENDATION = "No specific recommendation provided."
+
+
+def _domain_status(f: SpecialistFindings) -> str:
+    """Deterministic per-domain status, shared by Executive Summary and Health
+    Snapshot so they never contradict each other. Confirmed 2026-07-26 live:
+    Executive Summary defaulted unconditionally to "NO DATA" whenever a domain
+    had zero issues, while Health Snapshot separately defaulted to "OK" if
+    services_active was populated — same domain, same run, opposite statuses
+    shown in the two tables for domains that returned real structured data
+    (metrics, active services, instrumentation score) but simply had nothing
+    to flag. Use the `structured` flag instead — it's the field specifically
+    designed to distinguish "no issues found" from "specialist never called
+    submit_findings" (see SpecialistFindings docstring).
+    """
+    worst = min((i.severity for i in f.issues), key=lambda s: _SEV_ORDER.get(s, 9), default=None)
+    if worst:
+        return _SEV_STATUS.get(worst, "NO DATA")
+    return "OK" if f.structured else "NO DATA"
 
 
 def _recommendation_suffix(recommendation: str) -> str:
@@ -399,8 +422,7 @@ def _build_executive_summary_table(findings: dict[str, SpecialistFindings]) -> s
         f = findings.get(name)
         if not f:
             continue
-        worst = min((i.severity for i in f.issues), key=lambda s: _SEV_ORDER.get(s, 9), default=None)
-        status = _SEV_STATUS.get(worst, "NO DATA")
+        status = _domain_status(f)
         lines.append(f"| {name.upper()} | {status} | {(f.summary or '')[:120]} |")
     return "\n".join(lines)
 
@@ -476,8 +498,7 @@ def _build_health_snapshot(findings: dict[str, SpecialistFindings]) -> str:
         f = findings.get(name)
         if not f:
             continue
-        worst = min((i.severity for i in f.issues), key=lambda s: _SEV_ORDER.get(s, 9), default=None)
-        status = _SEV_STATUS.get(worst, "OK" if f.services_active else "NO DATA")
+        status = _domain_status(f)
         if f.metrics:
             k, v = next(iter(f.metrics.items()))
             key_metric = f"{k}: {v}"
