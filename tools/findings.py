@@ -403,6 +403,21 @@ def make_submit_fn(collector: dict, domain: str):
             cleaned_summary = (
                 f"{len(parsed_issues)} issue(s) found. Top: {top.description[:200]}"
             )
+        # Confirmed 2026-07-26 (astroshop-local live run): instrumentation specialist
+        # submitted a genuinely blank/unsalvageable summary AND zero issues, yet
+        # still passed real instrumentation_score + metrics (apm_score, metrics_score,
+        # logs_score) — a legitimate "no anti-patterns found" result, not a failed
+        # call. Showing "[instrumentation specialist output malformed]" discarded
+        # real structured data the specialist did successfully report. Synthesize a
+        # summary from score/metrics too, same rationale as the issues case above.
+        elif cleaned_summary == malformed_marker and (instrumentation_score is not None or metrics):
+            parts = []
+            if instrumentation_score is not None:
+                parts.append(f"score {instrumentation_score}/100")
+            if metrics:
+                metric_str = ", ".join(f"{k}: {v}" for k, v in list(metrics.items())[:4])
+                parts.append(metric_str)
+            cleaned_summary = f"No issues reported. {'; '.join(parts)}."
         collector[domain] = SpecialistFindings(
             domain=domain,
             summary=cleaned_summary,
