@@ -368,6 +368,23 @@ def _cross_domain_analysis(findings: dict[str, SpecialistFindings]) -> str:
 _DOMAIN_ORDER = ("health", "instrumentation", "governance", "detector", "logs", "rum", "rca", "synthetics", "db", "performance")
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _SEV_STATUS = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
+_NO_RECOMMENDATION = "No specific recommendation provided."
+
+
+def _recommendation_suffix(recommendation: str) -> str:
+    """Format a ' → {recommendation}' suffix, or '' if there's nothing real to
+    show. Confirmed 2026-07-26: the local fine-tuned model frequently omits a
+    separate "recommendation" field entirely and puts the actionable fix
+    directly in "description" instead (e.g. "Replace query method with bulk
+    SELECT operation for high CPU efficiency." as the DESCRIPTION) — the
+    generic "No specific recommendation provided." fallback (tools/findings.py)
+    then renders as a redundant, confusing second line since the description
+    already IS the recommendation. Suppress the suffix when there's nothing to
+    add.
+    """
+    if not recommendation or recommendation == _NO_RECOMMENDATION:
+        return ""
+    return f" → {recommendation}"
 
 
 def _build_executive_summary_table(findings: dict[str, SpecialistFindings]) -> str:
@@ -414,8 +431,8 @@ def _build_detailed_findings(findings: dict[str, SpecialistFindings]) -> str:
             for issue in sorted(f.issues, key=lambda i: _SEV_ORDER.get(i.severity, 9)):
                 svc = f" [{issue.service}]" if issue.service else ""
                 lines.append(
-                    f"- **[{str(issue.severity or 'medium').upper()}]**{svc} {issue.description} "
-                    f"→ {issue.recommendation}"
+                    f"- **[{str(issue.severity or 'medium').upper()}]**{svc} {issue.description}"
+                    f"{_recommendation_suffix(issue.recommendation)}"
                 )
         if f.metrics:
             lines.append(f"**Metrics:** {f.metrics}")
@@ -433,15 +450,22 @@ def _build_action_plan(findings: dict[str, SpecialistFindings]) -> str:
     if not all_issues:
         return ""
     lines = ["## Prioritized Action Plan", ""]
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for domain, issue in all_issues:
-        key = issue.recommendation[:80]
+        # Dedup key includes description, not just recommendation — confirmed
+        # 2026-07-26: many issues share the identical generic recommendation
+        # placeholder ("No specific recommendation provided."), which previously
+        # made every issue after the first look like a "duplicate" and get
+        # silently dropped from the action plan even though descriptions differed.
+        key = (issue.description[:80], issue.recommendation[:80])
         if key in seen:
             continue
         seen.add(key)
         svc = f" [{issue.service}]" if issue.service else ""
         lines.append(f"- **[{str(issue.severity or 'medium').upper()}][{domain}{svc}]** {issue.description}")
-        lines.append(f"  → {issue.recommendation}")
+        suffix = _recommendation_suffix(issue.recommendation)
+        if suffix:
+            lines.append(f"  {suffix.strip()}")
     return "\n".join(lines)
 
 
@@ -529,8 +553,8 @@ def _format_findings_for_custom_prompt(
             for issue in sorted(f.issues, key=lambda i: _SEV_ORDER.get(i.severity, 9)):
                 svc = f" [{issue.service}]" if issue.service else ""
                 parts.append(
-                    f"  - [{str(issue.severity or 'medium').upper()}]{svc} {issue.description} "
-                    f"→ {issue.recommendation}"
+                    f"  - [{str(issue.severity or 'medium').upper()}]{svc} {issue.description}"
+                    f"{_recommendation_suffix(issue.recommendation)}"
                 )
         if f.metrics:
             parts.append(f"**Metrics:** {f.metrics}")
