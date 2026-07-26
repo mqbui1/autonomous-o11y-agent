@@ -621,8 +621,24 @@ def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
         import inspect
         if inputs:
             sig = inspect.signature(fn)
-            valid = set(sig.parameters)
-            inputs = {k: v for k, v in inputs.items() if k in valid}
+            # Confirmed 2026-07-26 (live capture, rum/governance specialists):
+            # this filter was silently discarding malformed submit_findings
+            # envelope keys ("args", "arguments", "summary_issues") BEFORE they
+            # ever reached make_submit_fn's dedicated recovery logic for those
+            # exact shapes — because inspect.signature().parameters only lists
+            # the literal declared names (including the VAR_KEYWORD param's own
+            # name, e.g. "kwargs"), not arbitrary keys a **kwargs catch-all is
+            # designed to accept. A function that declares **kwargs is opting
+            # in to receiving unknown keys — don't filter for those; only guard
+            # tools with a fixed signature (the original intent: prevent a
+            # TypeError crash from a hallucinated arg name on a tool with no
+            # **kwargs).
+            has_var_keyword = any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if not has_var_keyword:
+                valid = set(sig.parameters)
+                inputs = {k: v for k, v in inputs.items() if k in valid}
         return fn(**inputs) if inputs else fn()
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
