@@ -291,6 +291,15 @@ def make_submit_fn(collector: dict, domain: str):
                 issue = Issue(severity="medium", domain=domain, description=str(i))
             raw_description = str(issue.description) if issue.description else ""
             raw_recommendation = str(issue.recommendation) if issue.recommendation else ""
+            # Confirmed 2026-07-26: governance specialist sometimes emits an issue
+            # dict with NEITHER description nor recommendation — just an unrelated
+            # field like {"action_args": {"dimension": "cluster_id"}} — leftover
+            # noise from a different tool-call shape it was thinking about. There's
+            # no text to salvage, and keeping it produces a confusing report line
+            # ("[Malformed specialist output for this finding]") that adds no value.
+            # Drop it entirely rather than surfacing a placeholder.
+            if not raw_description.strip() and not raw_recommendation.strip():
+                continue
             # Confirmed 2026-07-23 (round 8 live validation): health/db/synthetics
             # specialists sometimes omit "description" entirely but put the actual
             # finding text in "recommendation". Previously this showed the generic
