@@ -375,9 +375,14 @@ def make_submit_fn(collector: dict, domain: str):
                 issue.recommendation = (
                     _clean_findings_text(raw_recommendation) or "No specific recommendation provided."
                 )
+            desc_stripped = issue.description.strip()
+            # Strip one wrapping pair of parens, e.g. "(No cardinality or cost
+            # anomalies found)" — same benign-negation shape, just parenthesized.
+            if desc_stripped.startswith("(") and desc_stripped.endswith(")"):
+                desc_stripped = desc_stripped[1:-1].strip()
             if (
                 issue.recommendation == "No specific recommendation provided."
-                and _NO_ISSUE_RE.match(issue.description.strip())
+                and _NO_ISSUE_RE.match(desc_stripped)
             ):
                 continue
             parsed_issues.append(issue)
