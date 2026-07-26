@@ -32,6 +32,12 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 _TOOL_CALL_UNCLOSED_RE = re.compile(r"<tool_call>.*", re.DOTALL)
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
 _TIMEOUT_RE = re.compile(r"timed out after \d+ seconds", re.IGNORECASE)
+# Every tool-execution failure funnels through one of these prefixes (see
+# _invoke/_execute_parallel below) regardless of the underlying cause (HTTP
+# error, missing required arg, unknown tool name). Used to detect a run where
+# EVERY investigative tool call failed, so a model's confident conclusion at
+# submit_findings time can be flagged as unsupported rather than trusted as-is.
+_TOOL_ERROR_RE = re.compile(r"^(Tool .+ error:|Unknown tool:|Tool execution error:)")
 # Confirmed 2026-07-23 (round 8 live validation): the local fine-tuned model
 # sometimes emits a stray Misc Symbols/Dingbats character (e.g. U+2696 BALANCE
 # SCALE "⚖") where a bullet point or newline was intended, producing prose
@@ -305,6 +311,7 @@ def run_agent(
     blank_submit_retries = 0
     already_timed_out_tools: set = set()
     seen_call_signatures: set = set()
+    successful_investigative_calls = 0
     for turn in range(max_turns):
         # Force submit_findings (grammar-enforced by the provider) on the final turn
         # if it hasn't been called yet. Confirmed 2026-07-21/22: detector/synthetics/
@@ -456,6 +463,27 @@ def run_agent(
                         continue
                     seen_call_signatures.add(sig)
                 to_run.append(tu)
+
+            # Confirmed 2026-07-26 (synthetics specialist, live capture): after every
+            # investigative tool call this run failed (403 entitlement error, missing
+            # required arg, etc.), the model still submitted a confident negative
+            # conclusion ("no tests exist, no coverage gaps") with zero real supporting
+            # data — directly contradicted by other runs' ground truth for the same
+            # environment. If submit_findings is being called with zero successful
+            # investigative calls so far this run, inject an explicit caveat into the
+            # summary before it's executed, so the report reflects data unavailability
+            # instead of a fabricated finding.
+            if successful_investigative_calls == 0:
+                submit_tu = next((tu for tu in to_run if tu["name"] == "submit_findings"), None)
+                if submit_tu is not None:
+                    caveat = (
+                        "[DATA UNAVAILABLE — all investigative tool calls failed this "
+                        "run; the following is NOT based on real data] "
+                    )
+                    raw_summary = submit_tu.get("input", {}).get("summary")
+                    if isinstance(raw_summary, str) and raw_summary and not raw_summary.startswith(caveat):
+                        submit_tu["input"]["summary"] = caveat + raw_summary
+
             results, id_to_result = _execute_parallel(to_run, tool_fns, provider) if to_run else ([], {})
             for tu, skip_msg in to_skip:
                 id_to_result[tu["id"]] = skip_msg
@@ -463,6 +491,8 @@ def run_agent(
             for tu in to_run:
                 if _TIMEOUT_RE.search(id_to_result.get(tu["id"], "")):
                     already_timed_out_tools.add(tu["name"])
+                if tu["name"] != "submit_findings" and not _TOOL_ERROR_RE.match(id_to_result.get(tu["id"], "")):
+                    successful_investigative_calls += 1
 
             # Budget nudge: if the model is looping on investigative tools without
             # ever calling submit_findings (confirmed 2026-07-21/22: detector/synthetics
