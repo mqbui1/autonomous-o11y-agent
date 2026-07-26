@@ -352,7 +352,7 @@ def run_agent(
                         submit_findings_called = True
                         final_text = _sanitize_final_text(str(fenced_call.get("summary") or submit_result))
                         if capture:
-                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start, type(provider).__name__)
                         return final_text
                     except Exception as exc:
                         logger.warning("Fenced JSON submit_findings recovery failed: %s", exc)
@@ -365,7 +365,7 @@ def run_agent(
                         submit_findings_called = True
                         final_text = _sanitize_final_text(str(bare_call.get("summary") or submit_result))
                         if capture:
-                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                            _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start, type(provider).__name__)
                         return final_text
                     except Exception as exc:
                         logger.warning("Bare JSON submit_findings recovery failed: %s", exc)
@@ -397,7 +397,7 @@ def run_agent(
                 continue
             final_text = _sanitize_final_text(result["text"])
             if capture:
-                _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start, type(provider).__name__)
             return final_text
 
         if stop_reason == "tool_use":
@@ -552,7 +552,7 @@ def run_agent(
                         continue
                     final_text = _sanitize_final_text(submitted_summary or submit_result)
                     if capture:
-                        _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start)
+                        _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start, type(provider).__name__)
                     return final_text
 
             messages.append({"role": "user", "content": results})
@@ -645,8 +645,18 @@ def _invoke(tool_fns: dict[str, Callable], name: str, inputs: dict) -> str:
         return f"Tool {name} error: {exc}"
 
 
-def _save_conversation(system: str, user: str, messages: list, final_text: str, tools: list, start: float) -> None:
-    """Persist a completed conversation as a JSONL training example."""
+def _save_conversation(
+    system: str, user: str, messages: list, final_text: str, tools: list, start: float,
+    provider_name: str = "",
+) -> None:
+    """Persist a completed conversation as a JSONL training example.
+
+    provider_name: class name of the LLMProvider that generated this conversation
+    (e.g. "BedrockProvider", "OpenAICompatProvider") — lets downstream training-data
+    tooling (training/prepare_toolcall_data.py) distinguish real teacher-model
+    (Bedrock) captures, which should be trusted as gold, from local fine-tuned
+    model self-generations, which still need the usual label/quality filtering.
+    """
     try:
         _CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         record = {
@@ -658,6 +668,7 @@ def _save_conversation(system: str, user: str, messages: list, final_text: str, 
             "messages": messages,
             "final_text": final_text,
             "tool_names": [t.get("name", t.get("toolSpec", {}).get("name", "")) for t in tools],
+            "provider": provider_name,
         }
         path = _CAPTURE_DIR / f"{record['id']}.jsonl"
         path.write_text(json.dumps(record))
