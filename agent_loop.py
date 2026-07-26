@@ -40,6 +40,15 @@ _TIMEOUT_RE = re.compile(r"timed out after \d+ seconds", re.IGNORECASE)
 _STRAY_SYMBOL_RE = re.compile(r"[\u2600-\u27bf]")
 _DOUBLE_PUNCT_RE = re.compile(r"\.\s*\.")
 _MULTI_SPACE_RE = re.compile(r" {2,}")
+# Confirmed 2026-07-26 (Bedrock-vs-Ollama comparison): the synthetics specialist
+# sometimes wraps its whole summary in a ChatML-style special-token delimiter pair
+# — e.g. '<| AstroShop-local contains coverage gaps... |>' — reminiscent of
+# <|im_start|>/<|im_end|> but a different, malformed marker. Strip a leading "<|"
+# and/or trailing "|>" if they wrap the text (the closing tag is sometimes absent
+# on its own, e.g. when a caller truncates the text before it, so each side is
+# stripped independently rather than requiring both).
+_CHATML_WRAP_LEADING_RE = re.compile(r"^\s*<\|\s*")
+_CHATML_WRAP_TRAILING_RE = re.compile(r"\s*\|>\s*$")
 
 
 def _extract_fake_tool_call_summary(text: str) -> str | None:
@@ -140,6 +149,9 @@ def _sanitize_final_text(text: str) -> str:
     cleaned = _STRAY_SYMBOL_RE.sub(". ", cleaned)
     cleaned = _DOUBLE_PUNCT_RE.sub(".", cleaned)
     cleaned = _MULTI_SPACE_RE.sub(" ", cleaned)
+    cleaned = cleaned.strip()
+    cleaned = _CHATML_WRAP_LEADING_RE.sub("", cleaned)
+    cleaned = _CHATML_WRAP_TRAILING_RE.sub("", cleaned)
     cleaned = cleaned.strip()
     fake_summary = _extract_fake_tool_call_summary(cleaned)
     if fake_summary:
