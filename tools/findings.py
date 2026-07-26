@@ -301,6 +301,35 @@ def make_submit_fn(collector: dict, domain: str):
         actions_taken: list = None,
         **kwargs,  # absorb extra fields the model may pass
     ) -> str:
+        # Confirmed 2026-07-26 (astroshop-local live run, instrumentation specialist):
+        # the model sometimes wraps its ENTIRE genuine tool_use call in a nested
+        # {"args": {...actual fields...}} (or {"arguments": {...}}) envelope instead
+        # of passing summary/issues/etc. as top-level kwargs — e.g. the real call was
+        # `submit_findings(args={"summary": "...", ...})`. This is distinct from the
+        # b0fa24e fix, which only unwraps "arguments" in the fake-JSON-narrated-as-text
+        # recovery path (_extract_fenced_json_submit_call/_extract_bare_json_submit_call);
+        # this is a genuine native tool_use call, so every named param silently stayed
+        # at its empty default and the whole payload was lost in **kwargs. Unwrap here
+        # too, only filling params still at their default (never overwrites a real
+        # top-level value the model DID pass correctly).
+        nested = kwargs.pop("args", None) or kwargs.pop("arguments", None)
+        if isinstance(nested, dict):
+            if not summary:
+                summary = nested.get("summary", summary)
+            if not issues:
+                issues = nested.get("issues", issues)
+            if not services_active:
+                services_active = nested.get("services_active", services_active)
+            if not services_silent:
+                services_silent = nested.get("services_silent", services_silent)
+            if instrumentation_score is None:
+                instrumentation_score = nested.get("instrumentation_score", instrumentation_score)
+            if not metrics:
+                metrics = nested.get("metrics", metrics)
+            if not actions_taken:
+                actions_taken = nested.get("actions_taken", actions_taken)
+            for k, v in nested.items():
+                kwargs.setdefault(k, v)
         extra_summary, extra_issues = _split_malformed_summary_issues(kwargs.pop("summary_issues", None))
         if not str(summary or "").strip() and extra_summary:
             summary = extra_summary
