@@ -37,6 +37,37 @@ _NO_ISSUE_RE = re.compile(
     r'^no\s+\S.*\b(detected|found|observed|identified|present)\b\.?\s*$',
     re.IGNORECASE,
 )
+_TECH_SHORTHAND_TOKEN_RE = re.compile(r'^\d+(\.\d+)?[a-zA-Z%]{0,4}$')
+
+
+def _looks_like_unfilled_placeholder(text: str) -> bool:
+    """Detect the model echoing its OWN unfilled prompt-template scaffolding
+    verbatim as the actual submit_findings content instead of generating real
+    text. Confirmed 2026-07-26 live (performance specialist): summary=
+    "<2-3 sentence summary covering significant regressions, services
+    affected.>", description="<Issue description with severity class and
+    primary recommendation>.", recommendation="<Precision fix description:
+    e.g., 'Replace service.get_request(..), see [source](link-to-source)'"
+    (note: no closing '>' at all — truncated). Must NOT flag legitimate
+    technical shorthand like "<500ms p99 latency observed on cart service" or
+    "<5% error rate across all services", which also start with "<" but lead
+    with a short numeric+unit token rather than a descriptive word.
+    """
+    if not text:
+        return False
+    t = text.strip()
+    if not t.startswith("<"):
+        return False
+    close_idx = t.find(">")
+    if close_idx == -1:
+        first_token = t[1:].split(None, 1)[0] if len(t) > 1 else ""
+        if _TECH_SHORTHAND_TOKEN_RE.match(first_token):
+            return False
+        return len(t[1:].split()) >= 3
+    # A real placeholder is the WHOLE field value — the closing '>' should be
+    # right at (or almost at) the end, not a mid-sentence comparator.
+    trailing = t[close_idx + 1:]
+    return len(trailing) <= 2 and len(t[1:close_idx].split()) >= 2
 
 
 def _looks_like_json_leak(text: str) -> bool:
@@ -66,6 +97,8 @@ def _clean_findings_text(text: str, fallback: str = "") -> str:
         if m:
             return m.group(1).strip()
         return fallback or "[Malformed specialist output — raw JSON leaked into this field]"
+    if _looks_like_unfilled_placeholder(cleaned):
+        return fallback or "[Malformed specialist output — unfilled prompt template echoed instead of real content]"
     trimmed = _trim_truncated_tail(cleaned)
     # A genuinely empty result (e.g. the model gave up after a blank-summary retry
     # without producing anything at all) is just as unusable as a JSON leak — apply
@@ -315,15 +348,23 @@ def make_submit_fn(collector: dict, domain: str):
             # noise from a different tool-call shape it was thinking about. There's
             # no text to salvage, and keeping it produces a confusing report line
             # ("[Malformed specialist output for this finding]") that adds no value.
-            # Drop it entirely rather than surfacing a placeholder.
-            if not raw_description.strip() and not raw_recommendation.strip():
+            # Drop it entirely rather than surfacing a placeholder. Also drop when
+            # BOTH fields are unfilled prompt-template echoes (confirmed 2026-07-26:
+            # performance specialist submitted description="<Issue description with
+            # severity class and primary recommendation>." and recommendation=
+            # "<Precision fix description: e.g., ..." — non-empty strings, but pure
+            # scaffolding with zero real content) rather than keeping a useless
+            # HIGH-severity action-plan entry.
+            desc_usable = bool(raw_description.strip()) and not _looks_like_unfilled_placeholder(raw_description)
+            rec_usable = bool(raw_recommendation.strip()) and not _looks_like_unfilled_placeholder(raw_recommendation)
+            if not desc_usable and not rec_usable:
                 continue
             # Confirmed 2026-07-23 (round 8 live validation): health/db/synthetics
             # specialists sometimes omit "description" entirely but put the actual
             # finding text in "recommendation". Previously this showed the generic
             # "[Malformed specialist output for this finding]" placeholder even
             # though real, usable content was present — salvage it instead.
-            if not raw_description.strip() and raw_recommendation.strip():
+            if not desc_usable and rec_usable:
                 issue.description = _clean_findings_text(raw_recommendation)
                 issue.recommendation = "No specific recommendation provided."
             else:
