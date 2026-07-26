@@ -99,8 +99,28 @@ def _extract_fenced_json_submit_call(text: str) -> dict | None:
             data = json.loads(match.group(1))
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict) and ("summary" in data or "issues" in data):
-            return data
+        shape = _find_submit_shape(data)
+        if shape is not None:
+            return shape
+    return None
+
+
+def _find_submit_shape(data) -> dict | None:
+    """Check a parsed JSON value for a submit_findings-shaped payload, either at
+    the top level or nested one level under "arguments"/"input"/"parameters"
+    (the shape the model uses when it mimics a tool-call envelope as text, e.g.
+    `{"name": "submit_findings", "arguments": {"summary_issues": [...], ...}}`).
+    Confirmed 2026-07-26: seen with the real issue/summary data nested under
+    "arguments" while the top level only had "name"/"arguments"/"description" —
+    a top-level-only key check missed it even after JSON parsing succeeded.
+    """
+    if not isinstance(data, dict):
+        return None
+    if "summary" in data or "issues" in data or "summary_issues" in data:
+        return data
+    nested = data.get("arguments") or data.get("input") or data.get("parameters")
+    if isinstance(nested, dict) and ("summary" in nested or "issues" in nested or "summary_issues" in nested):
+        return nested
     return None
 
 
@@ -118,7 +138,10 @@ def _extract_bare_json_submit_call(text: str) -> dict | None:
     spanned from the FIRST `{` to the LAST `}` across an entire text containing two
     separate JSON blobs (e.g. `<tool_response>{...}\\n{...}</tool_response>`), producing
     one invalid concatenated blob that failed json.loads() and silently discarded both
-    real objects.
+    real objects. Also handles nested "arguments"-wrapped payloads via
+    _find_submit_shape() -- works regardless of code-fence markers around the JSON,
+    since the scan just looks for the next "{" character irrespective of surrounding
+    ``` text.
     """
     if not text:
         return None
@@ -134,8 +157,9 @@ def _extract_bare_json_submit_call(text: str) -> dict | None:
         except json.JSONDecodeError:
             idx = brace + 1
             continue
-        if isinstance(data, dict) and ("summary" in data or "issues" in data or "summary_issues" in data):
-            return data
+        shape = _find_submit_shape(data)
+        if shape is not None:
+            return shape
         idx = end
     return None
 
