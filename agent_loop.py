@@ -51,6 +51,21 @@ _CHATML_WRAP_LEADING_RE = re.compile(r"^\s*<\|\s*")
 _CHATML_WRAP_TRAILING_RE = re.compile(r"\s*\|>\s*$")
 
 
+def _strip_unbalanced_backticks(text: str) -> str:
+    """Drop all backtick characters when there's an odd count — i.e. at least
+    one is unpaired and leaking as a literal character instead of forming
+    valid inline-code markdown. Confirmed 2026-07-26 (Bedrock-vs-Ollama
+    comparison): 'In astroshop-local`, all services are showing...' — the
+    model apparently intended to wrap the environment name in backticks
+    (like the legitimate paired usage seen elsewhere, e.g. 'the `resolve`
+    service') but only emitted one side. Balanced pairs (even count) render
+    fine as inline code in the UI and are left untouched.
+    """
+    if text.count("`") % 2 == 1:
+        return text.replace("`", "")
+    return text
+
+
 def _extract_fake_tool_call_summary(text: str) -> str | None:
     """Detect a JSON-encoded tool-call description masquerading as plain
     end_turn text (e.g. '[{"function_name": "submit_findings", "arguments":
@@ -176,6 +191,7 @@ def _sanitize_final_text(text: str) -> str:
     cleaned = cleaned.strip()
     cleaned = _CHATML_WRAP_LEADING_RE.sub("", cleaned)
     cleaned = _CHATML_WRAP_TRAILING_RE.sub("", cleaned)
+    cleaned = _strip_unbalanced_backticks(cleaned)
     cleaned = cleaned.strip()
     fake_summary = _extract_fake_tool_call_summary(cleaned)
     if fake_summary:
