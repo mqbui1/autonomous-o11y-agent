@@ -95,9 +95,6 @@ def _extract_fenced_json_submit_call(text: str) -> dict | None:
     return None
 
 
-_BARE_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def _extract_bare_json_submit_call(text: str) -> dict | None:
     """Detect an un-fenced JSON object describing submit_findings args, optionally
     wrapped in a custom tag (e.g. `<json>{...}</json>`) instead of a real tool call.
@@ -106,18 +103,31 @@ def _extract_bare_json_submit_call(text: str) -> dict | None:
     fence at all -- _extract_fenced_json_submit_call requires ``` and never matched,
     so the whole JSON blob leaked verbatim into the report as the "summary". Accepts
     "summary_issues" too since make_submit_fn already normalizes that shape.
+
+    Scans for balanced JSON objects one `{` at a time via json.JSONDecoder.raw_decode
+    instead of a single greedy `\\{.*\\}` regex. Confirmed 2026-07-26: the greedy regex
+    spanned from the FIRST `{` to the LAST `}` across an entire text containing two
+    separate JSON blobs (e.g. `<tool_response>{...}\\n{...}</tool_response>`), producing
+    one invalid concatenated blob that failed json.loads() and silently discarded both
+    real objects.
     """
     if not text:
         return None
-    match = _BARE_JSON_OBJ_RE.search(text)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    if isinstance(data, dict) and ("summary" in data or "issues" in data or "summary_issues" in data):
-        return data
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(text)
+    while idx < n:
+        brace = text.find("{", idx)
+        if brace == -1:
+            return None
+        try:
+            data, end = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            idx = brace + 1
+            continue
+        if isinstance(data, dict) and ("summary" in data or "issues" in data or "summary_issues" in data):
+            return data
+        idx = end
     return None
 
 
@@ -165,6 +175,23 @@ def _converse_with_retry(
         )
         if result["stop_reason"] == "end_turn" and not (result["text"] or "").strip():
             logger.warning("Empty end_turn response (attempt %d/%d) — retrying", attempt + 1, max_attempts)
+            continue
+        # Confirmed 2026-07-26 (governance false-negative investigation, run
+        # 3a5f963baa): Ollama's OpenAI-compat tool_choice forcing is NOT reliably
+        # honored by the local fine-tuned model — on the literal last turn with
+        # force_tool="submit_findings" set, the model returned finish_reason="stop"
+        # with confident plain-text prose FALSELY claiming "All findings have been
+        # reported via `submit_findings`" instead of actually invoking the tool.
+        # This silently discarded a real, structured governance assessment (critical
+        # error-rate cardinality findings) in favor of an empty issues=[]/metrics={}
+        # fallback. Retry the forced call the same way we retry empty responses above
+        # — a fresh generation sometimes does honor the constraint.
+        if force_tool and result["stop_reason"] != "tool_use":
+            logger.warning(
+                "force_tool=%s requested but model ignored tool_choice with stop_reason=%s "
+                "(attempt %d/%d) — retrying",
+                force_tool, result["stop_reason"], attempt + 1, max_attempts,
+            )
             continue
         return result
     return result
