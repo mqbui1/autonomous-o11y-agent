@@ -37,9 +37,23 @@ _TIMEOUT_RE = re.compile(r"timed out after \d+ seconds", re.IGNORECASE)
 # SCALE "⚖") where a bullet point or newline was intended, producing prose
 # like "...for flagd⚖ Enable db.statement.capture⚖ The APM traces...". Replace
 # with a sentence break rather than leaving the garbled glyph in the report.
-_STRAY_SYMBOL_RE = re.compile(r"[\u2600-\u27bf]")
+# Confirmed 2026-07-26: also observed U+2299 "⊙" (CIRCLED DOT OPERATOR) used the
+# same way, outside the \u2600-\u27bf range. Added the narrow "circled operators"
+# sub-range \u2295-\u229f (⊕⊖⊗⊘⊙⊚⊛...) rather than the whole Mathematical
+# Operators block (\u2200-\u22ff), since that block also contains ≤/≥/∈/∑ etc.
+# which are legitimate in technical prose (e.g. "P99 ≤ 100ms") and must not be
+# stripped.
+_STRAY_SYMBOL_RE = re.compile(r"[\u2600-\u27bf\u2295-\u229f]")
 _DOUBLE_PUNCT_RE = re.compile(r"\.\s*\.")
 _MULTI_SPACE_RE = re.compile(r" {2,}")
+# Confirmed 2026-07-26 (astroshop-local live validation): the model sometimes
+# drops the ". " separator between a numbered-list marker and the item text,
+# e.g. "2APM and log linkage has missing attributes..." instead of "2. APM
+# and log linkage...". Only matches a short (1-2 digit) numeral immediately
+# followed by 2+ uppercase letters — real observability acronyms (APM, RCA,
+# DB, RUM, etc.) in this domain, not generic shorthand like "5xx"/"100ms"/
+# "4xx" (lowercase after the digit) which must be left untouched.
+_MANGLED_LIST_NUMERAL_RE = re.compile(r"(?<![\d.])(\d{1,2})([A-Z]{2,})")
 # Confirmed 2026-07-26 (Bedrock-vs-Ollama comparison): the synthetics specialist
 # sometimes wraps its whole summary in a ChatML-style special-token delimiter pair
 # — e.g. '<| AstroShop-local contains coverage gaps... |>' — reminiscent of
@@ -186,6 +200,7 @@ def _sanitize_final_text(text: str) -> str:
     cleaned = _TOOL_CALL_UNCLOSED_RE.sub("", cleaned)
     cleaned = _CJK_RE.sub("", cleaned)
     cleaned = _STRAY_SYMBOL_RE.sub(". ", cleaned)
+    cleaned = _MANGLED_LIST_NUMERAL_RE.sub(r"\1. \2", cleaned)
     cleaned = _DOUBLE_PUNCT_RE.sub(".", cleaned)
     cleaned = _MULTI_SPACE_RE.sub(" ", cleaned)
     cleaned = cleaned.strip()
