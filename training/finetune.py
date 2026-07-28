@@ -53,6 +53,14 @@ MLX_LORA_LAYERS = 4     # top-N transformer layers to fine-tune — reduced from
                         # on 2026-07-22 — confirmed via exact seed=0 batch-order replication
                         # that the offending row was well-formed, ruling out a data bug this
                         # time; this matches mlx_lm's own suggested fix ("fewer --num-layers").
+                        # RE-CONFIRMED unstable on 2026-07-27 (round 11 attempt): restoring to 8
+                        # at the identical LR=2e-6/grad_accum=16 NaN'd again, this time even
+                        # earlier (iter 33 vs iter 513 previously) on the larger 26962-row
+                        # dataset. Two independent NaNs at 8 layers across very different
+                        # datasets confirms this is a real, repeatable instability at this layer
+                        # count — not a one-off fluke tied to a specific row. Do not retry 8
+                        # layers at this LR without also lowering LR further or increasing
+                        # grad_accum well beyond 16 first.
 MLX_BATCH       = 1     # multi-turn tool-calling examples run much longer (median
                         # ~8k tokens with full tool-result context) than the old
                         # final-text-only rows — batch=1 is required to fit
