@@ -11,10 +11,37 @@ Works with any endpoint that implements the OpenAI Chat Completions API:
 
 import json
 import logging
+import re
+import uuid
 
 from .base import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+_TOOL_CALL_START_RE = re.compile(r'\{\s*"name"\s*:')
+
+
+def _find_bare_tool_call(text: str) -> dict | None:
+    """Recover a {"name": ..., "arguments": {...}} object embedded in narrated
+    text, whether or not it's wrapped in <tool_call> tags -- stopgap for models
+    whose tool-call output isn't reliably tag-wrapped yet (Ollama's own parser
+    only populates message.tool_calls from <tool_call>...</tool_call>, so an
+    untagged-but-otherwise-correct call falls through to plain content text
+    instead). Uses json.JSONDecoder.raw_decode rather than a regex because
+    regex can't correctly balance nested braces in the arguments object (e.g.
+    {"arguments": {"filters": {"key": "value"}}} would truncate at the wrong
+    "}"). Returns the FIRST match only: observed duplicate/repeated tool-call
+    JSON in raw output should collapse to one call, not fan out into several.
+    """
+    decoder = json.JSONDecoder()
+    for m in _TOOL_CALL_START_RE.finditer(text):
+        try:
+            obj, _end = decoder.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+            return obj
+    return None
 
 try:
     from openai import OpenAI
@@ -134,6 +161,30 @@ class OpenAICompatProvider(LLMProvider):
                 }
 
         text = choice.message.content or ""
+
+        # Stopgap: recover a tool call the model clearly intended but didn't wrap
+        # in <tool_call> tags, rather than silently treating it as prose (which
+        # would make the specialist narrate fake findings instead of pulling
+        # real data).
+        parsed = _find_bare_tool_call(text)
+        name = (parsed or {}).get("name") or ""
+        if name:
+            logger.warning(
+                "Recovered untagged tool call %r from content via fallback parser "
+                "(model did not wrap it in <tool_call> tags)",
+                name,
+            )
+            return {
+                "stop_reason": "tool_use",
+                "text": "",
+                "tool_uses": [{
+                    "id": f"fallback-{uuid.uuid4().hex[:8]}",
+                    "name": name,
+                    "input": parsed.get("arguments") or {},
+                }],
+                "raw_message": choice.message,
+            }
+
         return {"stop_reason": "end_turn", "text": text, "tool_uses": [], "raw_message": choice.message}
 
     def format_tool_result(self, tool_use_id: str, content: str) -> dict:
