@@ -85,18 +85,61 @@ def get_or_create_project():
     return project
 
 
+def _env_facts_block(env_facts):
+    """Render environment facts with explicit fact->consequence phrasing.
+
+    Confirmed 2026-07-30 via direct spot-check: passing bare facts like
+    "Synthetics entitled: False" was NOT enough for Galileo's groundedness/
+    factuality judges to flag a specialist inventing specific test counts —
+    both scored 1.0 on a known-fabricated synthetics report. These metrics
+    flag CONTRADICTIONS with the given context, not universal fact-checking;
+    a fact stated as a bare boolean doesn't logically connect to "therefore
+    any specific number here is made up" for the judge. Spelling out the
+    consequence explicitly turns it into a checkable contradiction.
+    """
+    lines = [f"Environment: {env_facts.get('environment')} (Kubernetes={env_facts.get('is_kubernetes')})"]
+
+    has_lo = env_facts.get("has_log_observer")
+    lo_note = "" if has_lo else (
+        " — Log Observer is NOT licensed for this org (all log APIs return 404); "
+        "any log coverage percentages, log line counts, or Log Observer-derived "
+        "claims in the report are FABRICATED, not real data."
+    )
+    lines.append(f"Log Observer entitled: {has_lo}{lo_note}")
+
+    has_syn = env_facts.get("has_synthetics")
+    syn_note = "" if has_syn else (
+        " — the Synthetics API is NOT licensed for this org (returns HTTP 403); "
+        "any specific test names, test counts, pass/fail counts, or uptime "
+        "percentages the specialist reports are FABRICATED, not real API data."
+    )
+    lines.append(f"Synthetics entitled: {has_syn}{syn_note}")
+
+    has_rum = env_facts.get("has_rum")
+    rum_note = "" if has_rum else (
+        " — there are no real browser RUM sessions in this environment; any "
+        "specific session counts, Core Web Vitals numbers, or session IDs "
+        "the specialist reports are FABRICATED, not real data."
+    )
+    lines.append(f"RUM active: {has_rum}{rum_note}")
+
+    return "\n".join(lines)
+
+
 def _build_context(run_id, domain, spec, env_facts):
     active = spec.get("services_active") or []
     silent = spec.get("services_silent") or []
     return (
         f"Run: {run_id}  Domain: {domain}\n"
-        f"Environment: {env_facts.get('environment')} "
-        f"(Kubernetes={env_facts.get('is_kubernetes')})\n"
-        f"Log Observer entitled: {env_facts.get('has_log_observer')}\n"
-        f"Synthetics entitled: {env_facts.get('has_synthetics')}\n"
-        f"RUM active: {env_facts.get('has_rum')}\n"
+        f"{_env_facts_block(env_facts)}\n"
         f"Active services observed: {active}\n"
-        f"Silent services (no telemetry): {len(silent)}"
+        f"Silent services (no telemetry): {len(silent)}\n\n"
+        "IMPORTANT: The facts above are the ONLY verified ground truth available "
+        "for this run. Any specific number, ID, name, or percentage in the "
+        "specialist's report that is not directly derivable from these facts is "
+        "UNVERIFIED — do not treat it as grounded/factual just because it looks "
+        "precise or plausible. A confident, well-formatted claim can still be a "
+        "fabrication when the underlying tool call actually failed."
     )
 
 

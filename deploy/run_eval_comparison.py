@@ -27,7 +27,8 @@ import galileo
 from openai import OpenAI
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from tools.galileo_eval import METRICS, get_or_create_project, PROJECT_NAME, _extract_metric, _wait_for_completion
+from tools.galileo_eval import METRICS, get_or_create_project, PROJECT_NAME, _extract_metric, _wait_for_completion, _env_facts_block
+from auto_labeler import ENV_FACTS
 
 EVAL_SET = Path(__file__).parent / "eval_set.jsonl"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
@@ -45,13 +46,23 @@ def load_eval_set():
 
 
 def build_messages(rec, eval_id):
+    """Build the dataset input used for SCORING (not generation).
+
+    Distinct from the bare [system, user] pair used to generate the
+    fine-tuned candidate (see main()) — this appends real environment
+    ground-truth facts (with explicit fact->consequence phrasing, see
+    tools/galileo_eval.py's _env_facts_block) plus a hidden eval_id marker.
+    Without the facts block, groundedness/factuality had nothing concrete to
+    check specific numbers against and scored known-fabricated content 1.0
+    (confirmed via spot-check 2026-07-30) — same fix as auto_labeler.py's
+    live scoring path, applied here too since eval_set.jsonl's bare task
+    prompts ("Run a complete X assessment...") carry zero grounding facts.
+    """
     system, user, _assistant = rec["messages"][:3]
-    # Append a hidden eval_id marker so every dataset input is unique — the
-    # 33 eval items collapse to only 11 distinct prompts otherwise (the
-    # domain task prompt doesn't embed run-specific facts), which would
-    # break Galileo's dataset_input-based result matching.
     tagged_user = dict(user)
-    tagged_user["content"] = user["content"] + f"\n\n[eval_id={eval_id}]"
+    tagged_user["content"] = (
+        user["content"] + f"\n\n{_env_facts_block(ENV_FACTS)}\n\n[eval_id={eval_id}]"
+    )
     return [system, tagged_user]
 
 
