@@ -33,6 +33,11 @@ from auto_labeler import ENV_FACTS
 EVAL_SET = Path(__file__).parent / "eval_set.jsonl"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "o11y-agent")
+# Was hardcoded to the literal "ollama" — fine for a local Ollama server (which
+# ignores the key), but blocks any endpoint that actually checks a bearer token
+# (e.g. a Tailscale-exposed custom inference server). The openai client sends
+# this as the `Authorization: Bearer <key>` header automatically.
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 
 
 def load_eval_set():
@@ -140,7 +145,7 @@ def main():
     bedrock_texts = [rec["messages"][2]["content"] for rec in recs]
 
     print("Generating fine-tuned candidates via Ollama...")
-    client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+    client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
     finetuned_texts = []
     for i, rec in enumerate(recs):
         messages = rec["messages"][:2]
