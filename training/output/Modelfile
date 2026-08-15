@@ -1,4 +1,4 @@
-FROM ./o11y-agent-3b-q4km.gguf
+FROM /Users/mbui/Documents/autonomous-o11y-agent/training/output/o11y-agent-3b-round10-q4km.gguf
 
 PARAMETER num_ctx 32768
 PARAMETER temperature 0.1

@@ -45,7 +45,7 @@ services:
       - SPLUNK_INGEST_TOKEN
       - SPLUNK_REALM
       - SPLUNK_ENVIRONMENT
-      - GOMEMLIMIT=200MiB
+      - GOMEMLIMIT=400MiB
     logging: *logging
 
   # ============================================================
@@ -290,6 +290,7 @@ services:
     image: ${IMAGE_NAME:-ghcr.io/open-telemetry/demo}:${DEMO_VERSION:-latest}-fraud-detection
     container_name: fraud-detection
     restart: unless-stopped
+    init: true
     environment:
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
@@ -588,6 +589,7 @@ services:
     image: astroshop-recommendation-splunk
     container_name: recommendation
     restart: unless-stopped
+    init: true
     ports:
       - "9001"
     environment:
@@ -644,7 +646,7 @@ services:
   # ============================================================
 
   flagd:
-    image: ghcr.io/open-feature/flagd:v0.12.1
+    image: ghcr.io/open-feature/flagd:v0.16.1
     container_name: flagd
     restart: unless-stopped
     environment:

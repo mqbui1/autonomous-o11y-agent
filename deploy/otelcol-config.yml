@@ -47,18 +47,17 @@ processors:
           - "^net\\.sock\\.peer\\.addr$"
     summary: debug
   filter/drop_flagd_stream:
-    spans:
-      exclude:
-        match_type: strict
-        span_names:
-          - "/flagd.evaluation.v2.Service/EventStream"
+    error_mode: ignore
+    traces:
+      span:
+        - 'name == "/flagd.evaluation.v2.Service/EventStream"'
   batch:
     timeout: 5s
     send_batch_size: 1000
 
   memory_limiter:
     check_interval: 2s
-    limit_mib: 200
+    limit_mib: 400
 
   # Stamp every span/metric/log with deployment.environment = $SPLUNK_ENVIRONMENT
   # This scopes all telemetry to the environment the agent will query.
@@ -147,7 +146,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span, redaction/pii_ipv4]
+      processors: [memory_limiter, filter/drop_flagd_stream, batch, resourcedetection, resource/add_environment, transform/promote_env_to_span, redaction/pii_ipv4]
       exporters: [otlphttp/traces, signalfx, otlphttp/agent]
 
     metrics:
