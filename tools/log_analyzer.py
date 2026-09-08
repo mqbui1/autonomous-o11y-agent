@@ -264,7 +264,7 @@ def _service_log_volumes(service: str = "", hours: int = 24) -> dict[str, float]
 
     filter_clause = f'filter("deployment.environment", "{cfg.environment}")'
     if service:
-        filter_clause += f'.and(filter("service.name", "{service}"))'
+        filter_clause += f' and filter("service.name", "{service}")'
 
     program = (
         f"data('sf.org.numLogLines', {filter_clause})"

@@ -57,7 +57,7 @@ processors:
 
   memory_limiter:
     check_interval: 2s
-    limit_mib: 400
+    limit_mib: 1024
 
   # Stamp every span/metric/log with deployment.environment = $SPLUNK_ENVIRONMENT
   # This scopes all telemetry to the environment the agent will query.

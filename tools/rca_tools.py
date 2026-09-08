@@ -456,7 +456,13 @@ def get_service_error_rate(service: str = "", environment: str = "", hours: int 
         hours: Lookback window in hours (default: 1).
     """
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = now_ms - hours * 3600 * 1000
+    # Confirmed 2026-09-06 (fault-injection verification tooling): a fractional
+    # `hours` (needed for sub-hour lookback windows) leaves start_ms as a float
+    # (e.g. 1788752917008.0) — embedded verbatim in the SignalFlow querystring,
+    # the trailing ".0" makes the API reject it with a bare HTTP 404 that the
+    # broad except/logger.warning below silently swallows as "no data found"
+    # instead of surfacing the real cause. int() every caller gets, integer or not.
+    start_ms = int(now_ms - hours * 3600 * 1000)
     svc_filter = (
         f"filter('sf_environment', '{environment}') and filter('sf_service', '{service}')"
     )
@@ -507,13 +513,26 @@ def get_service_latency(service: str, environment: str, hours: int = 1) -> str:
         hours: Lookback window in hours (default: 1).
     """
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = now_ms - hours * 3600 * 1000
+    # Confirmed 2026-09-06 (fault-injection verification tooling): a fractional
+    # `hours` (needed for sub-hour lookback windows) leaves start_ms as a float
+    # (e.g. 1788752917008.0) — embedded verbatim in the SignalFlow querystring,
+    # the trailing ".0" makes the API reject it with a bare HTTP 404 that the
+    # broad except/logger.warning below silently swallows as "no data found"
+    # instead of surfacing the real cause. int() every caller gets, integer or not.
+    start_ms = int(now_ms - hours * 3600 * 1000)
     svc_filter = (
         f"filter('sf_environment', '{environment}') and filter('sf_service', '{service}')"
     )
-    # Splunk APM p99 metric is in nanoseconds
+    # Splunk APM p99 metric is in nanoseconds. Confirmed 2026-09-07
+    # (fault-injection verification tooling): this metric name was missing the
+    # '.ns' segment ('service.request.duration.p99' instead of
+    # 'service.request.duration.ns.p99', the name every other caller in this
+    # codebase — get_service_topology, db_tools.py, profiling_tools.py — uses
+    # correctly) — silently queried a nonexistent metric and always fell
+    # through to "No p99 latency data found", even for services confirmed to
+    # have real p99 data via get_service_topology.
     p99_prog = (
-        f"data('service.request.duration.p99', filter={svc_filter})"
+        f"data('service.request.duration.ns.p99', filter={svc_filter})"
         f".publish(label='p99_ns')"
     )
     try:
@@ -555,7 +574,13 @@ def get_infra_metrics(environment: str, service: str = "", hours: int = 1) -> st
         hours: Lookback window in hours (default: 1).
     """
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = now_ms - hours * 3600 * 1000
+    # Confirmed 2026-09-06 (fault-injection verification tooling): a fractional
+    # `hours` (needed for sub-hour lookback windows) leaves start_ms as a float
+    # (e.g. 1788752917008.0) — embedded verbatim in the SignalFlow querystring,
+    # the trailing ".0" makes the API reject it with a bare HTTP 404 that the
+    # broad except/logger.warning below silently swallows as "no data found"
+    # instead of surfacing the real cause. int() every caller gets, integer or not.
+    start_ms = int(now_ms - hours * 3600 * 1000)
 
     base_filter = f"filter('sf_environment', '{environment}')"
     if service:
@@ -617,6 +642,30 @@ def get_infra_metrics(environment: str, service: str = "", hours: int = 1) -> st
                 }
         except Exception as exc:
             logger.debug("host cpu query failed: %s", exc)
+
+    # Host-level memory fallback. Confirmed 2026-09-07 (fault-injection
+    # verification tooling): non-k8s (e.g. docker-compose) environments never
+    # populate k8s_memory_mb, and unlike CPU there was no host-level fallback
+    # at all — memory checks always returned empty/no-data regardless of real
+    # host memory pressure. 'memory.utilization' (host-wide %) mirrors the
+    # existing 'cpu.utilization' host fallback above.
+    if "k8s_memory_mb" not in results:
+        host_filter = f"filter('sf_environment', '{environment}')"
+        host_mem_prog = (
+            f"data('memory.utilization', filter={host_filter})"
+            f".mean(over='5m').publish(label='host_mem')"
+        )
+        try:
+            hmem_result = _signalflow_execute(host_mem_prog, start_ms, now_ms)
+            hmem_vals = _flatten_stream_values(hmem_result)
+            if hmem_vals:
+                results["host_mem_pct"] = {
+                    "avg_pct": round(sum(hmem_vals) / len(hmem_vals), 1),
+                    "peak_pct": round(max(hmem_vals), 1),
+                    "data_points": len(hmem_vals),
+                }
+        except Exception as exc:
+            logger.debug("host memory query failed: %s", exc)
 
     return json.dumps({
         "environment": environment,

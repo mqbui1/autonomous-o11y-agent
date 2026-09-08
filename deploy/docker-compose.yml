@@ -45,7 +45,7 @@ services:
       - SPLUNK_INGEST_TOKEN
       - SPLUNK_REALM
       - SPLUNK_ENVIRONMENT
-      - GOMEMLIMIT=400MiB
+      - GOMEMLIMIT=1024MiB
     logging: *logging
 
   # ============================================================
@@ -326,7 +326,11 @@ services:
       - PRODUCT_CATALOG_ADDR=product-catalog:3550
       - RECOMMENDATION_ADDR=recommendation:9001
       - SHIPPING_ADDR=http://shipping:50050
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      # Node's OTel JS SDK defaults to HTTP/protobuf export unless
+      # OTEL_EXPORTER_OTLP_PROTOCOL is set — pointed at the gRPC-only port
+      # 4317 silently failed (same bug confirmed 2026-09-07 for payment;
+      # SPLUNK_PROFILER_LOGS_ENDPOINT below already correctly uses 4318).
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
       - OTEL_SERVICE_NAME=frontend
       - PUBLIC_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:8080/otlp-http/v1/traces
@@ -523,7 +527,13 @@ services:
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
       - PAYMENT_PORT=50051
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      # Node's OTel JS SDK (@splunk/otel) defaults to HTTP/protobuf export
+      # unless OTEL_EXPORTER_OTLP_PROTOCOL is set — pointed at the gRPC-only
+      # port 4317 would silently fail (same class of bug confirmed 2026-09-07
+      # for shipping's Rust SDK, but Node's diag logger swallows the error
+      # silently instead of logging it). SPLUNK_PROFILER_LOGS_ENDPOINT below
+      # already correctly uses 4318 — align the main OTLP endpoint with it.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
       - OTEL_SERVICE_NAME=payment
@@ -633,7 +643,12 @@ services:
       - QUOTE_ADDR=http://quote:8090
       - FLAGD_HOST=flagd
       - FLAGD_PORT=8013
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      # shipping's Rust OTel SDK defaults to HTTP/protobuf export, not gRPC —
+      # confirmed 2026-09-07 via persistent "HTTP export failed: network
+      # error" logs while pointed at the gRPC-only port 4317 (survived a
+      # container restart, ruling out DNS staleness). Point it at the
+      # collector's HTTP receiver (4318) instead.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,deployment.environment=${SPLUNK_ENVIRONMENT}
       - OTEL_SERVICE_NAME=shipping
     depends_on:
