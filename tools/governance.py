@@ -48,8 +48,11 @@ def scan_cardinality(top: int = 20, verbose: bool = False) -> str:
     if verbose:
         cmd.append("--verbose")
 
-    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
-    return summarise(rc, stdout, stderr, "scan_cardinality")
+    try:
+        rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
+        return summarise(rc, stdout, stderr, "scan_cardinality")
+    except Exception as exc:
+        return f"[scan_cardinality error]: {exc}"
 
 
 def scan_cardinality_anomalies(ratio: float = 2.0, days: int = 7) -> str:
@@ -71,8 +74,11 @@ def scan_cardinality_anomalies(ratio: float = 2.0, days: int = 7) -> str:
         "--days", str(days),
     ]
 
-    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
-    return summarise(rc, stdout, stderr, "scan_cardinality_anomalies")
+    try:
+        rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
+        return summarise(rc, stdout, stderr, "scan_cardinality_anomalies")
+    except Exception as exc:
+        return f"[scan_cardinality_anomalies error]: {exc}"
 
 
 def fix_cardinality_report(top: int = 20, no_ai: bool = False) -> str:
@@ -101,8 +107,11 @@ def fix_cardinality_report(top: int = 20, no_ai: bool = False) -> str:
     if no_ai:
         cmd.append("--no-ai")
 
-    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
-    return summarise(rc, stdout, stderr, "fix_cardinality_report")
+    try:
+        rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
+        return summarise(rc, stdout, stderr, "fix_cardinality_report")
+    except Exception as exc:
+        return f"[fix_cardinality_report error]: {exc}"
 
 
 def drilldown_dimension(dimension: str) -> str:
@@ -117,8 +126,23 @@ def drilldown_dimension(dimension: str) -> str:
     cfg = get_config()
     cmd = [_script_path(cfg), "drilldown", "--dimension", dimension]
 
-    rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
-    return summarise(rc, stdout, stderr, "drilldown_dimension")
+    # Confirmed 2026-09-07 (parity re-test, adFailure scenario, both backends):
+    # drilldown on a high-cardinality dimension (e.g. "system.device") can exceed
+    # the subprocess_timeout — the underlying script enumerates dimension values
+    # across every metric in the org. Previously this raised subprocess.TimeoutExpired
+    # uncaught, unlike every other tool module's try/except convention — caught only
+    # incidentally by agent_loop.py's outer catch-all with a raw exception string.
+    # Catch and return a clean, actionable message like the rest of the codebase.
+    try:
+        rc, stdout, stderr = run(cmd, cwd=_writable_cwd())
+        return summarise(rc, stdout, stderr, "drilldown_dimension")
+    except Exception as exc:
+        return (
+            f"[drilldown_dimension error]: {exc}. This dimension may have too many "
+            "distinct values to drill down within the timeout budget — do not retry "
+            "this exact call; estimate blast radius from scan_cardinality's per-metric "
+            "counts instead."
+        )
 
 
 # Cap per-scan output to avoid overflowing the context window of smaller models.
