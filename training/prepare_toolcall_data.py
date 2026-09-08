@@ -285,7 +285,7 @@ def convert_capture(rec: dict, label_index: dict, toolspec_registry: dict) -> li
             continue
         is_final = (i == len(full) - 1)
         row_messages = full[: i + 1]
-        row = {"messages": row_messages, "id": rec.get("id"), "turn_index": i}
+        row = {"messages": row_messages, "id": rec.get("id"), "turn_index": i, "_teacher": is_teacher}
         if tools_oai:
             row["tools"] = tools_oai
         if is_final:
@@ -308,6 +308,11 @@ def main():
     ap.add_argument("--captures", default="training/data/raw_captures")
     ap.add_argument("--labeled-export", default="deploy/training_exports/train_20260720_151646.jsonl")
     ap.add_argument("--out", default="training/data/toolcall_train.jsonl")
+    ap.add_argument("--max-self-ratio", type=float, default=None,
+                     help="Cap self-distilled (non-teacher) weighted rows to this multiple of "
+                          "teacher-weighted rows (e.g. 3.0 = at most 3x as many self rows as "
+                          "teacher rows). Subsamples self rows down with a fixed seed. Default: "
+                          "no cap (teacher rows can still be drowned out by raw self volume).")
     args = ap.parse_args()
 
     cap_dir = pathlib.Path(args.captures)
@@ -337,15 +342,27 @@ def main():
 
     excluded = sum(1 for r in all_rows if r["_weight"] == 0)
     kept = [r for r in all_rows if r["_weight"] > 0]
-    weighted_out = []
+    teacher_out, self_out = [], []
     for r in kept:
         w = r.pop("_weight")
+        is_teacher = r.pop("_teacher")
         # Weighting (0/1/2x oversampling) is fully baked in via duplication here.
         # Strip label/galileo_scores so finetune.py's _load_all_examples doesn't
         # re-apply its own _weight_count() on top of this and double-oversample.
         r.pop("label", None)
         r.pop("galileo_scores", None)
-        weighted_out.extend([r] * w)
+        (teacher_out if is_teacher else self_out).extend([r] * w)
+
+    if args.max_self_ratio is not None and teacher_out:
+        cap = int(len(teacher_out) * args.max_self_ratio)
+        if len(self_out) > cap:
+            import random
+            random.Random(42).shuffle(self_out)
+            print(f"Capping self-distilled rows: {len(self_out)} -> {cap} "
+                  f"(max_self_ratio={args.max_self_ratio}x of {len(teacher_out)} teacher rows)")
+            self_out = self_out[:cap]
+
+    weighted_out = teacher_out + self_out
 
     out_path = pathlib.Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,7 +372,8 @@ def main():
 
     print(f"Captures processed: {n_captures} ({n_matched} joined to a final-turn label)")
     print(f"Raw per-turn rows generated: {len(all_rows)} ({excluded} excluded by weight=0)")
-    print(f"Final effective rows written (after 2x oversampling): {len(weighted_out)} -> {out_path}")
+    print(f"Teacher rows: {len(teacher_out)}  Self-distilled rows: {len(self_out)}")
+    print(f"Final effective rows written: {len(weighted_out)} -> {out_path}")
 
 
 if __name__ == "__main__":
