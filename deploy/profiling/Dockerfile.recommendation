@@ -10,6 +10,12 @@ FROM ghcr.io/open-telemetry/demo:latest-recommendation
 # Install Splunk OTel Python distro into the existing venv
 RUN /venv/bin/pip install --no-cache-dir "splunk-opentelemetry[all]"
 
+# splunk-opentelemetry[all] transitively downgrades protobuf below what the
+# base image's pre-generated demo_pb2.py needs, causing:
+#   "gencode 7.35.0 runtime 6.33.6. Runtime version cannot be older than
+#   the linked gencode version." (confirmed 2026-08-15). Re-pin upward.
+RUN /venv/bin/pip install --no-cache-dir "protobuf>=7.35.0"
+
 # Bootstrap installs any missing auto-instrumentation libraries
 RUN /venv/bin/splunk-py-trace-bootstrap || true
 
