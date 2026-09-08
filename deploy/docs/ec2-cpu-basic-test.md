@@ -54,10 +54,13 @@ is lost, and brings the total down to ~9.9GB (~6GB headroom).
    SPLUNK_ENVIRONMENT=astroshop-local
    LLM_PROVIDER=ollama
    OLLAMA_MODEL=o11y-agent-14b
-   OLLAMA_BASE_URL=http://ollama:11434
+   OLLAMA_BASE_URL=http://ollama:11434/v1
    SPECIALIST_TIMEOUT=3600
    ```
-   `SPECIALIST_TIMEOUT` bumped well above the 900s default — CPU-only
+   `OLLAMA_BASE_URL` needs the trailing `/v1` — the agent talks to Ollama over
+   its OpenAI-compat endpoint (`config.py`'s default already includes it;
+   this only matters if you override the value). `SPECIALIST_TIMEOUT` bumped
+   well above the 900s default — CPU-only
    inference on 4 vCPUs will be much slower per turn than the GPU host this
    was validated on. This is a basic capability check, not a speed test; let
    it take however long it takes.

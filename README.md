@@ -72,6 +72,13 @@ docker compose up -d
 
 See [deploy/README.md](deploy/README.md) for full setup instructions.
 
+## Self-contained deployment (customer sites)
+
+For deploying against a customer's own Splunk Observability Cloud org — no
+Astronomy Shop, no AWS/Bedrock dependency, LLM served locally via Ollama —
+see [deploy/docs/self-contained-deployment.md](deploy/docs/self-contained-deployment.md)
+for packaging, prerequisites, and download instructions.
+
 ## Specialists
 
 | Specialist | What it assesses |

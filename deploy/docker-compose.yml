@@ -62,9 +62,9 @@ services:
   # Build once:
   #   docker compose --profile local-llm build ollama
   # Run full stack with local LLM (GPU host):
-  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile local-llm up -d
+  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434/v1 docker compose --profile local-llm up -d
   # Run full stack with local LLM (CPU-only host):
-  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434 \
+  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434/v1 \
   #     docker compose -f docker-compose.yml -f docker-compose.cpu.yml --profile local-llm up -d
   # ============================================================
   ollama:

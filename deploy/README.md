@@ -38,3 +38,4 @@ Trigger one immediately: `docker compose up -d o11y-agent` (agent runs on startu
 - [Configuration reference](docs/configuration.md) — all `.env` variables
 - [Supervisor integration](docs/supervisor-integration.md) — how the UI connects to the agent
 - [Operations guide](docs/operations.md) — common commands, AWS token refresh, troubleshooting
+- [Self-contained deployment](docs/self-contained-deployment.md) — packaging, prerequisites, and download instructions for deploying at a customer site (no Astronomy Shop, no AWS dependency)
