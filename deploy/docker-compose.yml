@@ -50,13 +50,22 @@ services:
 
   # ============================================================
   # FINE-TUNED LOCAL LLM (optional — profile: local-llm)
-  # Bundles the o11y-agent-3b fine-tuned model in an Ollama container.
-  # Use instead of Bedrock when deploying in air-gapped or cost-sensitive envs.
+  # Bundles the o11y-agent-14b fine-tuned model in an Ollama container.
+  # Use instead of Bedrock when deploying in air-gapped, cost-sensitive, or
+  # fully self-contained (no AWS dependency) environments.
+  #
+  # GPU reservation below requires nvidia-container-toolkit + a GPU host.
+  # On a CPU-only host (e.g. EC2 t2.xlarge), use docker-compose.cpu.yml to
+  # override the GPU reservation, or this service will fail to start with
+  # "could not select device driver".
   #
   # Build once:
   #   docker compose --profile local-llm build ollama
-  # Run full stack with local LLM:
-  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-3b docker compose --profile local-llm up -d
+  # Run full stack with local LLM (GPU host):
+  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434 docker compose --profile local-llm up -d
+  # Run full stack with local LLM (CPU-only host):
+  #   LLM_PROVIDER=ollama OLLAMA_MODEL=o11y-agent-14b OLLAMA_BASE_URL=http://ollama:11434 \
+  #     docker compose -f docker-compose.yml -f docker-compose.cpu.yml --profile local-llm up -d
   # ============================================================
   ollama:
     profiles: ["local-llm"]
@@ -64,8 +73,8 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.ollama
       args:
-        GGUF_PATH: training/output/o11y-agent-3b-q4km.gguf
-        MODEL_NAME: o11y-agent-3b
+        GGUF_PATH: training/models/qwen14b-o11y-agent/qwen14b-o11y-agent-q4_k_m.gguf
+        MODEL_NAME: o11y-agent-14b
     image: o11y-agent-ollama:latest
     container_name: ollama
     restart: unless-stopped
@@ -749,8 +758,13 @@ services:
       - O11Y_AGENT_URL=http://o11y-agent:4318
       - SPLUNK_REALM
       - SPLUNK_ACCESS_TOKEN
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_MODEL=qwen2.5:3b
+      # Points supervisor's own chat assistant at the same fine-tuned 14B model
+      # served by the `ollama` service on this compose network (requires
+      # --profile local-llm — see that service's comment block). This is
+      # independent of the assessment data shown in the Agent tab, which
+      # always comes from O11Y_AGENT_URL regardless of this setting.
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=o11y-agent-14b
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
       - CLAUDE_MODEL=${BEDROCK_MODEL_ID}
       - SUPERVISOR_DATA_DIR=/app/data
@@ -760,7 +774,11 @@ services:
       - ../../splunk-otel-supervisor/static:/app/static:ro
       - ../../splunk-otel-supervisor/supervisor:/app/supervisor:ro
     depends_on:
-      - o11y-agent
+      o11y-agent:
+        condition: service_started
+      ollama:
+        condition: service_started
+        required: false
     logging: *logging
 
 volumes:

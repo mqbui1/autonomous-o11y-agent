@@ -1,0 +1,85 @@
+FROM /Users/mbui/Documents/autonomous-o11y-agent/training/output/o11y-agent-3b.gguf
+
+# CPU-only host variant of training/output/Modelfile (e.g. EC2 t2.xlarge,
+# 16GB RAM, no GPU) — identical except num_ctx, trimmed from 32768 to 8192.
+#
+# Why: Qwen2.5-14B's GQA KV cache costs ~192KB/token in Ollama's default f16
+# cache (2 * 48 layers * 8 kv_heads * 128 head_dim * 2 bytes). At num_ctx
+# 32768 that's ~6.3GB of KV cache ON TOP of the ~8.4GB Q4_K_M model weights —
+# ~14.7GB total, leaving under 1.5GB headroom on a 16GB box (OS + Docker +
+# agent container won't fit). At num_ctx 8192 the KV cache drops to ~1.5GB
+# (~9.9GB total), leaving a workable ~6GB headroom.
+#
+# 8192 is also a genuine capability match, not just a memory hack: the QLoRA
+# fine-tune's own axolotl config used sequence_len: 8192 (see training.md
+# 2026-09-05 entry) — the model was never trained on longer contexts, so
+# nothing is lost versus the 32768 default used on GPU hosts.
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+
+# Root cause fix (2026-07-22, round 6): our fuse/GGUF pipeline drops the
+# Qwen2.5 tokenizer_config.json chat_template (confirmed: present in
+# training/models/qwen2.5-3b-mlx/tokenizer_config.json, ABSENT in
+# training/output/fused-3b/tokenizer_config.json after mlx_lm fuse). Without
+# an explicit TEMPLATE, Ollama fell back to a degenerate `{{ .Prompt }}`
+# passthrough with no tool-calling grammar, so multi-tool-call turns
+# intermittently came back as stop_reason=end_turn with the raw
+# `<tool_call>...</tool_call>` text as plain content instead of structured
+# tool_calls -- which agent_loop.py's defense-in-depth sanitizer then stripped
+# to an empty string, producing the "No summary provided." fallback for
+# db/synthetics/performance/rca. This TEMPLATE is copied verbatim from
+# `ollama show qwen2.5:3b --modelfile` (the official Qwen2.5 Ollama template,
+# which matches the format the model was actually fine-tuned on) so Ollama's
+# OpenAI-compat endpoint reliably parses tool calls back into `tool_calls`.
+TEMPLATE """{{- if .Messages }}
+{{- if or .System .Tools }}<|im_start|>system
+{{- if .System }}
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+{{- end }}<|im_end|>
+{{ end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ if .Content }}{{ .Content }}
+{{- else if .ToolCalls }}<tool_call>
+{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
+{{ end }}</tool_call>
+{{- end }}{{ if not $last }}<|im_end|>
+{{ end }}
+{{- else if eq .Role "tool" }}<|im_start|>user
+<tool_response>
+{{ .Content }}
+</tool_response><|im_end|>
+{{ end }}
+{{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
+{{ end }}
+{{- end }}
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ end }}{{ .Response }}{{ if .Response }}<|im_end|>{{ end }}"""

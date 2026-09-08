@@ -1,0 +1,27 @@
+# CPU-only override for the `ollama` service.
+#
+# The base docker-compose.yml reserves an NVIDIA GPU for `ollama`, which fails
+# to start on a CPU-only host with "could not select device driver". This
+# override uses the compose-spec `!reset` tag to fully clear the `deploy`
+# block for this service (a plain empty map/list does NOT work here — compose
+# deep-merges mappings and merges list items by index, so `devices: []` or
+# `deploy: {}` silently leave the base GPU reservation in place; verified via
+# `docker compose ... config ollama` before landing this file). Ollama then
+# falls back to CPU inference.
+#
+# Usage (CPU-only host, e.g. EC2 t2.xlarge):
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml \
+#     --profile local-llm up -d
+#
+# CPU inference on a 14B q4_k_m model is much slower than GPU — consider
+# raising SPECIALIST_TIMEOUT in .env accordingly.
+#
+# Uses the default full-context Modelfile (num_ctx 32768, ~14.7GB total with
+# KV cache) — fine on boxes with >=24GB RAM. A trimmed num_ctx=8192 variant
+# exists at training/output/Modelfile.cpu-ec2 (~9.9GB total) for tighter
+# 16GB boxes — pass it via `build: args: MODELFILE_PATH:` in a further
+# override if ever needed on a smaller host.
+
+services:
+  ollama:
+    deploy: !reset null
