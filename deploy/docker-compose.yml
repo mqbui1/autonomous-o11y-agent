@@ -763,8 +763,16 @@ services:
       # --profile local-llm — see that service's comment block). This is
       # independent of the assessment data shown in the Agent tab, which
       # always comes from O11Y_AGENT_URL regardless of this setting.
+      #
+      # Ollama serializes requests (OLLAMA_NUM_PARALLEL=1) — while an o11y-agent
+      # specialist turn is generating (multi-minute on CPU), a queued chat
+      # request sits behind it. Supervisor's own client default
+      # (OLLAMA_TIMEOUT_SECONDS=120s) gives up before its turn comes, surfacing
+      # as a 500. Raised here so chat waits it out instead of hard-failing;
+      # the chat call itself is capped at num_predict=512 tokens once served.
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=o11y-agent-14b
+      - OLLAMA_TIMEOUT_SECONDS=600
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
       - CLAUDE_MODEL=${BEDROCK_MODEL_ID}
       - SUPERVISOR_DATA_DIR=/app/data
