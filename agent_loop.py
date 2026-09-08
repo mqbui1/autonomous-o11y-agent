@@ -266,6 +266,22 @@ def _converse_with_retry(
                 force_tool, result["stop_reason"], attempt + 1, max_attempts,
             )
             continue
+        # Confirmed 2026-09-06 (14b parity re-test, paymentFailure100 scenario):
+        # Ollama's OpenAI-compat tool_choice forcing a SPECIFIC function name is
+        # not reliably honored either -- the model returned stop_reason="tool_use"
+        # (passing the check above) but called an unrelated investigative tool
+        # (search_error_traces) instead of the forced submit_findings on the
+        # literal last turn, exhausting max_turns with zero findings submitted.
+        # Verify the actual tool invoked matches force_tool, not just that *some*
+        # tool was invoked.
+        if force_tool and not any(tu.get("name") == force_tool for tu in result.get("tool_uses", [])):
+            called = [tu.get("name") for tu in result.get("tool_uses", [])]
+            logger.warning(
+                "force_tool=%s requested but model called %s instead "
+                "(attempt %d/%d) — retrying",
+                force_tool, called, attempt + 1, max_attempts,
+            )
+            continue
         return result
     return result
 
@@ -444,7 +460,30 @@ def run_agent(
             # another live re-run of identical work.
             to_skip: list[tuple[dict, str]] = []
             to_run: list[dict] = []
+            # Confirmed 2026-09-06 (14b parity re-test, paymentUnreachable scenario):
+            # the model sometimes calls submit_findings TWICE in the same turn
+            # (e.g. splitting its findings across two calls). Both would otherwise
+            # execute concurrently in _execute_parallel and both write to the same
+            # collector[domain] key — whichever finishes last in the thread pool
+            # wins non-deterministically, which can silently clobber a real,
+            # well-formed submission with a second, malformed/empty one (root
+            # cause of the HEALTH specialist report showing "[health specialist
+            # output malformed]" even though a real submission also happened this
+            # turn). Only the first submit_findings call is honored — matches the
+            # `next(...)` lookup below that picks the first match for the
+            # early-return/final_text path anyway — the rest are skipped entirely
+            # rather than executed.
+            seen_submit_this_turn = False
             for tu in tool_uses:
+                if tu["name"] == "submit_findings":
+                    if seen_submit_this_turn:
+                        to_skip.append((tu, (
+                            "You already called submit_findings once this turn — "
+                            "only the first call is used. Do not call it more than "
+                            "once per turn."
+                        )))
+                        continue
+                    seen_submit_this_turn = True
                 if tu["name"] in already_timed_out_tools:
                     to_skip.append((tu, (
                         f"Tool {tu['name']} already timed out earlier this run — do NOT "
@@ -560,6 +599,38 @@ def run_agent(
 
         logger.warning("Unexpected stop_reason: %s — stopping", stop_reason)
         break
+
+    # Confirmed 2026-09-06 (14b parity re-test, paymentFailure100 scenario): even
+    # with the force_tool retry logic above (both the stop_reason=="tool_use" check
+    # and the actual-tool-name check), the model can still defy a forced
+    # submit_findings on the literal last turn across all _converse_with_retry
+    # attempts — e.g. calling search_error_traces instead every time. Previously
+    # this fell straight through to a bare "Agent reached max turns without
+    # completing." string with NO structured findings at all, discarding whatever
+    # real investigative data was gathered earlier this run. Synthesize a fallback
+    # submit_findings call directly (bypassing the model) so the report always gets
+    # a structured (if degraded) result instead of a total loss.
+    if has_submit_tool and not submit_findings_called:
+        logger.warning(
+            "Exhausted max_turns without a submit_findings call (force_tool retries "
+            "were ignored by the model on every attempt) — synthesizing a fallback "
+            "submit_findings call instead of discarding the run."
+        )
+        submit_fn = tool_fns.get("submit_findings")
+        if submit_fn is not None:
+            try:
+                fallback_summary = (
+                    "[INCOMPLETE — the model exhausted its turn budget without ever "
+                    "calling submit_findings, even when forced on the final turn; no "
+                    "structured findings were produced this run.]"
+                )
+                submit_fn(summary=fallback_summary, issues=[], metrics={})
+                final_text = _sanitize_final_text(fallback_summary)
+                if capture:
+                    _save_conversation(system_prompt, initial_message, messages, final_text, tools, _start, type(provider).__name__)
+                return final_text
+            except Exception as exc:
+                logger.warning("Fallback submit_findings synthesis failed: %s", exc)
 
     return "Agent reached max turns without completing."
 

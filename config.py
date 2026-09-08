@@ -83,6 +83,21 @@ class AgentConfig:
     specialist_timeout: int = field(
         default_factory=lambda: int(os.environ.get("SPECIALIST_TIMEOUT", "900"))
     )
+    # How many specialists may call the LLM concurrently. Bedrock has real
+    # per-request cloud capacity, so all 10 specialists firing at once is fine.
+    # A local Ollama instance is a single-process server serializing requests
+    # (OLLAMA_NUM_PARALLEL=1 on memory-constrained hardware) — 10 concurrent
+    # specialists just pile up in its request queue, and one of them can sit
+    # queued long enough to blow past the OpenAI client's HTTP read timeout
+    # before ever reaching config.specialist_timeout. Confirmed via live-test
+    # regression 2026-09-06 (RCA specialist: raw httpx.ReadTimeout, not the
+    # coordinator's TimeoutError). Default lower for non-bedrock providers.
+    specialist_max_concurrency: int = field(
+        default_factory=lambda: int(os.environ.get(
+            "SPECIALIST_MAX_CONCURRENCY",
+            "10" if os.environ.get("LLM_PROVIDER", "bedrock").lower() == "bedrock" else "3",
+        ))
+    )
 
     # ── Streaming mode (gateway co-deployment) ────────────────────────────────
     streaming_port: int = field(

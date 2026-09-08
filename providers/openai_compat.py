@@ -58,14 +58,19 @@ class OpenAICompatProvider(LLMProvider):
     and maps message/response shapes between the two APIs.
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 900.0):
         if not _OPENAI_AVAILABLE:
             raise ImportError(
                 "openai package is required for LLM_PROVIDER=openai. "
                 "Install with: pip install openai>=1.0.0"
             )
         self.model = model
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        # Explicit timeout matching config.specialist_timeout — the openai SDK's
+        # own default (600s) is shorter than our specialist budget, so a slow
+        # local model (e.g. queued behind other concurrent specialists on a
+        # single-slot Ollama server) can raise a raw httpx.ReadTimeout before
+        # the coordinator's own timeout handling ever gets a chance to run.
+        self._client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
 
     def convert_tools(self, tools: list[dict]) -> list:
         """Convert Bedrock toolSpec format → OpenAI function format."""

@@ -124,7 +124,7 @@ def run_assessment(
         _update_progress = None
 
     findings: dict[str, SpecialistFindings] = {}
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=config.specialist_max_concurrency) as pool:
         futures = {
             pool.submit(
                 mod.run, config,
@@ -268,7 +268,17 @@ def _issue_topic(description: str) -> str:
 
 def _issue_fingerprint(issue) -> str:
     """Semantic fingerprint for deduplicating issues across specialists."""
-    svc = (issue.service or "").lower().strip()
+    # Confirmed 2026-09-07 (14b parity re-test, loadGeneratorFloodHomepage scenario):
+    # a 14b specialist emitted issue.service as a list (e.g. ["frontend", "cart"])
+    # instead of a string. `.lower()` on a list raised AttributeError, crashing
+    # the entire assessment run (not just this one issue) since this runs
+    # unconditionally over every specialist's issues during dedup. Bedrock never
+    # produced this shape in any run. Coerce defensively rather than trust the
+    # declared str type.
+    raw_service = issue.service
+    if isinstance(raw_service, list):
+        raw_service = ", ".join(str(s) for s in raw_service)
+    svc = str(raw_service or "").lower().strip()
     topic = _issue_topic(issue.description or "")
     return f"{svc}|{issue.severity}|{topic}"
 
@@ -656,7 +666,19 @@ def _ground_truth_silent_synthetics_services(environment: str, active_services: 
         return []
     try:
         from tools.synthetics_tools import get_synthetics_coverage_gaps
-        data = json.loads(get_synthetics_coverage_gaps(active_services, environment))
+        raw = get_synthetics_coverage_gaps(active_services, environment)
+        # Confirmed 2026-09-07 (14b parity re-test, compound_backend scenario):
+        # get_synthetics_coverage_gaps returns a bracketed error string like
+        # "[get_synthetics_coverage_gaps error]: ..." (not JSON) on API failure —
+        # e.g. a 403 "Missing entitlement" when Synthetics isn't enabled for the
+        # org, which is expected/common, not a bug. json.loads() on that string
+        # raised a JSONDecodeError that was caught by the except below anyway, but
+        # logged as a full WARNING traceback as if it were unexpected. Check for
+        # the error-string shape first so the common case logs quietly at DEBUG.
+        if raw.startswith("["):
+            logger.debug("Ground-truth synthetics coverage query returned an error: %s", raw)
+            return []
+        data = json.loads(raw)
         return sorted(data.get("services_with_no_synthetics", []))
     except Exception:
         logger.warning("Ground-truth synthetics coverage query failed", exc_info=True)

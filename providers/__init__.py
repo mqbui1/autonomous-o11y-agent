@@ -21,6 +21,7 @@ def get_provider(config) -> LLMProvider:
             base_url=config.ollama_base_url,
             api_key="ollama",
             model=config.ollama_model,
+            timeout=float(config.specialist_timeout),
         )
 
     if provider == "openai":
@@ -33,6 +34,7 @@ def get_provider(config) -> LLMProvider:
             base_url=config.openai_base_url,
             api_key=config.openai_api_key or "none",
             model=config.openai_model,
+            timeout=float(config.specialist_timeout),
         )
 
     # Default: bedrock

@@ -38,6 +38,41 @@ _NO_ISSUE_RE = re.compile(
     re.IGNORECASE,
 )
 _TECH_SHORTHAND_TOKEN_RE = re.compile(r'^\d+(\.\d+)?[a-zA-Z%]{0,4}$')
+# Defense-in-depth against a self-contradictory fabricated count in the prose
+# summary vs. this same result's own structured services_active/services_silent
+# lists. Confirmed 2026-09-06 (o11y-agent-14b live-test regression, health
+# specialist): summary said "12 silent services (0 active)" while
+# services_active held 8 named services. Scoped narrowly to the two prose
+# shapes actually observed — "N silent/active services" and the parenthetical
+# shorthand "(N active)"/"(N silent)" continuing a prior clause — rather than
+# any bare "N active", to avoid rewriting unrelated numbers (e.g. "3 active
+# alerts") that don't refer to the services_active/services_silent lists.
+_SERVICE_COUNT_RE = re.compile(
+    r'(?:\b(?P<n1>\d+)\s+(?P<kind1>silent|active)\s+services?\b'
+    r'|\b(?P<n2>\d+)\s+services?\s+(?:that\s+are\s+|are\s+)?(?P<kind2>silent|active)\b'
+    r'|\(\s*(?P<n3>\d+)\s+(?P<kind3>silent|active)\s*\))',
+    re.IGNORECASE,
+)
+
+
+def _fix_service_count_contradiction(summary: str, services_active: list, services_silent: list) -> str:
+    """Correct a prose summary's own active/silent service COUNT when it
+    contradicts this same result's structured services_active/services_silent
+    lists (see _SERVICE_COUNT_RE above for the confirmed regression). Rewrites
+    only the digit in place, leaving the rest of the sentence untouched.
+    """
+    if not summary:
+        return summary
+
+    def _replace(m: "re.Match") -> str:
+        n = m.group("n1") or m.group("n2") or m.group("n3")
+        kind = (m.group("kind1") or m.group("kind2") or m.group("kind3")).lower()
+        actual = len(services_active) if kind == "active" else len(services_silent)
+        if str(actual) == n:
+            return m.group(0)
+        return m.group(0).replace(n, str(actual), 1)
+
+    return _SERVICE_COUNT_RE.sub(_replace, summary)
 
 
 def _looks_like_unfilled_placeholder(text: str) -> bool:
@@ -360,6 +395,19 @@ def make_submit_fn(collector: dict, domain: str):
                 filtered["severity"] = filtered.get("severity") or "medium"
                 filtered["domain"] = filtered.get("domain") or domain
                 filtered["description"] = filtered.get("description") or ""
+                # Confirmed 2026-09-07 (14b parity re-test, loadGeneratorFloodHomepage
+                # scenario): the model emitted "service" as a list (e.g. ["frontend",
+                # "cart"]) instead of a string. Issue.service is typed str, but a
+                # dataclass doesn't enforce that at runtime — the list survived all
+                # the way to coordinator.py's _issue_fingerprint(), which crashed the
+                # ENTIRE assessment run with AttributeError ('list' has no '.lower()').
+                # Coerce here so every downstream consumer (coordinator dedup,
+                # remediation fingerprinting, report rendering) gets a real string.
+                raw_service = filtered.get("service")
+                if isinstance(raw_service, list):
+                    filtered["service"] = ", ".join(str(s) for s in raw_service)
+                elif raw_service is not None and not isinstance(raw_service, str):
+                    filtered["service"] = str(raw_service)
                 issue = Issue(**filtered)
             elif isinstance(i, Issue):
                 issue = i
@@ -447,11 +495,14 @@ def make_submit_fn(collector: dict, domain: str):
                 metric_str = ", ".join(f"{k}: {v}" for k, v in list(metrics.items())[:4])
                 parts.append(metric_str)
             cleaned_summary = f"No issues reported. {'; '.join(parts)}."
+        coerced_active = _coerce_str_list(services_active)
+        coerced_silent = _coerce_str_list(services_silent)
+        cleaned_summary = _fix_service_count_contradiction(cleaned_summary, coerced_active, coerced_silent)
         collector[domain] = SpecialistFindings(
             domain=domain,
             summary=cleaned_summary,
-            services_active=_coerce_str_list(services_active),
-            services_silent=_coerce_str_list(services_silent),
+            services_active=coerced_active,
+            services_silent=coerced_silent,
             instrumentation_score=instrumentation_score,
             issues=parsed_issues,
             metrics=metrics or {},
