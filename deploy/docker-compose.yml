@@ -131,6 +131,7 @@ services:
       - AUTO_APPLY=${AUTO_APPLY:-false}
       - CAPTURE_TRAINING_DATA=${CAPTURE_TRAINING_DATA:-false}
       - TOOL_TIMEOUT=${TOOL_TIMEOUT:-180}
+      - SPECIALIST_TIMEOUT=${SPECIALIST_TIMEOUT:-900}
       # Streaming receiver (collector fans out here)
       - OTLP_RECEIVER_PORT=4318
       - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
