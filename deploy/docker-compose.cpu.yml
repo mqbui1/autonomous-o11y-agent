@@ -16,12 +16,28 @@
 # CPU inference on a 14B q4_k_m model is much slower than GPU — consider
 # raising SPECIALIST_TIMEOUT in .env accordingly.
 #
-# Uses the default full-context Modelfile (num_ctx 32768, ~14.7GB total with
-# KV cache) — fine on boxes with >=24GB RAM. A trimmed num_ctx=8192 variant
-# exists at training/output/Modelfile.cpu-ec2 (~9.9GB total) for tighter
-# 16GB boxes — pass it via `build: args: MODELFILE_PATH:` in a further
-# override if ever needed on a smaller host.
+# Two more CPU-specific tunings, added 2026-09-08 after live-testing on an
+# 8 vCPU (4 physical core x 2 hyperthreads) EC2 box:
+#
+# 1. MODELFILE_PATH -> training/output/Modelfile.cpu-ec2 (num_ctx 8192,
+#    ~9.9GB total with KV cache) instead of the GPU-host default
+#    (training/output/Modelfile, num_ctx 32768, ~14.7GB). Smaller num_ctx
+#    means less attention/KV-cache work per token as a specialist's
+#    multi-turn conversation grows — this is a real per-token compute
+#    saving on CPU, not just a memory-footprint one. No capability lost:
+#    8192 matches the QLoRA fine-tune's own training sequence_len.
+#
+# 2. OLLAMA_NUM_THREAD=8 -> llama-server was observed defaulting to ~4
+#    threads (physical core count) on this 8-vCPU/4-core/2-hyperthread
+#    box, leaving half the logical CPUs idle during generation. Forcing
+#    all 8 logical CPUs is free to try; hyperthreading won't double
+#    throughput for this compute-bound workload but should still help.
 
 services:
   ollama:
     deploy: !reset null
+    build:
+      args:
+        MODELFILE_PATH: training/output/Modelfile.cpu-ec2
+    environment:
+      - OLLAMA_NUM_THREAD=8
