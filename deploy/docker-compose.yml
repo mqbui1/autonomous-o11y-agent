@@ -775,6 +775,16 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=o11y-agent-14b
       - OLLAMA_TIMEOUT_SECONDS=600
+      # Separate from the interactive chat above: supervisor also runs an
+      # autonomous "think()" reasoning loop (watcher.py, every ~60s) plus an
+      # executive-summary synthesis (every ~12min) that independently poll
+      # the same single-slot Ollama instance in the background. On a shared
+      # CPU host these compete with o11y-agent's specialists for the one
+      # serving slot and can measurably delay/stall batch assessments. Set to
+      # "false" to disable both (does not affect the interactive chat feature
+      # above, which is gated separately). Default "true" preserves prior
+      # behavior.
+      - OLLAMA_REASONING_ENABLED=${OLLAMA_REASONING_ENABLED:-true}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
       - CLAUDE_MODEL=${BEDROCK_MODEL_ID}
       - SUPERVISOR_DATA_DIR=/app/data
