@@ -121,7 +121,7 @@ Configure source code access via `SOURCE_ROOT` (local path) or `GITHUB_TOKEN` + 
 # AWS Bedrock (default)
 AWS_DEFAULT_REGION=us-west-2 python3 main.py ...
 
-# Any OpenAI-compatible endpoint (Luna, Azure, Ollama)
+# Any OpenAI-compatible endpoint (Azure, Ollama, vLLM)
 LLM_PROVIDER=openai OPENAI_BASE_URL=http://localhost:11434/v1 OPENAI_MODEL=llama3.1 python3 main.py ...
 ```
 

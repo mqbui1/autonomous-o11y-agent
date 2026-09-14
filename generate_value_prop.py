@@ -211,13 +211,16 @@ doc.add_paragraph()
 add_callout(
     doc,
     "TL;DR —",
-    "The Autonomous O11y Agent is an AI-driven observability control plane that runs nine "
+    "The Autonomous O11y Agent is an AI-driven observability control plane that runs ten "
     "specialist agents in parallel against your Splunk Observability Cloud environment. "
     "It audits health, instrumentation quality, cardinality cost, detector coverage, log "
     "patterns, frontend experience, database dependencies, synthetic test coverage, and "
-    "performs root cause analysis — then synthesizes all findings into a single prioritized "
-    "action plan. It replaces hours of manual review with a fully automated, always-current "
-    "assessment that any engineer can run in minutes.",
+    "code-level performance hotspots, and performs root cause analysis — then synthesizes "
+    "all findings into a single prioritized action plan with ready-to-apply remediations, "
+    "surfaced through the Splunk OTel Supervisor UI. It replaces hours of manual review "
+    "with a fully automated, always-current assessment that any engineer can run in minutes "
+    "— and it can run entirely on-premises against a customer's own environment with no "
+    "cloud LLM dependency, using our own fine-tuned local model.",
     bg=RGBColor(0xe8, 0xf5, 0xe9),
     title_color=RGBColor(0x2e, 0x7d, 0x32),
 )
@@ -271,7 +274,7 @@ add_body(doc,
 
 add_heading(doc, "Batch Mode — Periodic Deep Assessment", level=2, space_before=10)
 add_body(doc,
-    "Nine specialist AI agents run in parallel, each with deep expertise in a specific "
+    "Ten specialist AI agents run in parallel, each with deep expertise in a specific "
     "domain. Each specialist calls live Splunk APIs — not static rules — to understand "
     "the actual state of your environment. Findings are synthesized into a single "
     "prioritized assessment with specific service names, metric values, and recommended "
@@ -293,14 +296,14 @@ add_body(doc,
 # 3. THE NINE SPECIALISTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-add_heading(doc, "3. Nine Specialist Agents", level=1)
+add_heading(doc, "3. Ten Specialist Agents", level=1)
 
 add_body(doc,
-    "All nine specialists run in parallel (ThreadPoolExecutor, 900s timeout each). "
-    "Each specialist has access to domain-specific tools, calls live Splunk APIs, "
-    "and returns structured findings — not freeform text. The coordinator then performs "
-    "cross-domain analysis (services flagged by multiple specialists) before a final "
-    "synthesis pass with full tool access."
+    "All ten specialists run in parallel (ThreadPoolExecutor, configurable timeout — "
+    "60 minutes by default). Each specialist has access to domain-specific tools, calls "
+    "live Splunk APIs, and returns structured findings — not freeform text. The coordinator "
+    "then performs cross-domain analysis (services flagged by multiple specialists) before "
+    "a final synthesis pass with full tool access."
 )
 doc.add_paragraph()
 
@@ -445,6 +448,27 @@ specialists = [
         "external API, a saturated connection pool. This specialist makes those dependencies "
         "visible before they cause user-facing outages.",
     ),
+    (
+        "10 · Performance",
+        "agents/performance.py",
+        "AlwaysOn Profiling hotspots, N+1 patterns, latency outliers, code-level fix generation",
+        [
+            "Analyzes AlwaysOn CPU Profiling flamegraphs and Method Hotspots to find the "
+            "exact function burning the most CPU per service",
+            "Pattern-matches source code around the hot line to classify the issue: sync I/O "
+            "in a hot path, N+1 async loops, serial awaits that could run in parallel, "
+            "waterfall calls, downstream RPC latency, or lock contention",
+            "Degrades gracefully across 4 tiers depending on what data is available — from a "
+            "full file:line code diff (profiling + source access) down to an operation-level "
+            "recommendation from span patterns alone when no profiling data exists",
+            "Pulls live source code from the running container and sends it to the LLM along "
+            "with the exact blocking call, generating a specific rewrite using the file's own "
+            "variable names and logic — not a generic suggestion",
+        ],
+        "Turns a flamegraph nobody has time to read into an exact, ready-to-review code fix "
+        "— reducing performance triage from a multi-hour profiling deep-dive to a single "
+        "AI-generated pull request.",
+    ),
 ]
 
 for spec in specialists:
@@ -528,7 +552,7 @@ add_two_col_table(doc,
 add_heading(doc, "5. Cross-Domain Synthesis", level=1)
 
 add_body(doc,
-    "After all nine specialists complete, the coordinator performs two additional passes "
+    "After all ten specialists complete, the coordinator performs two additional passes "
     "before producing the final report:"
 )
 
@@ -543,7 +567,7 @@ add_body(doc,
 
 add_heading(doc, "Synthesis LLM Pass", level=3, space_before=10)
 add_body(doc,
-    "A final LLM pass with access to all tools across all nine specialists produces "
+    "A final LLM pass with access to all tools across all ten specialists produces "
     "the executive summary. It can call additional tools to drill into specific "
     "cross-cutting issues that specialists surfaced but did not fully resolve — "
     "for example, calling get_trace_analysis on a service that the health, logs, "
@@ -583,12 +607,34 @@ add_two_col_table(doc,
     [
         ["AWS Bedrock (default)", "Uses boto3 Converse API. Requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY"],
         ["Anthropic Claude (direct)", "Set LLM_PROVIDER=anthropic, ANTHROPIC_API_KEY"],
-        ["Galileo Luna", "Set LLM_PROVIDER=openai, OPENAI_BASE_URL=http://luna-host/v1"],
         ["Azure OpenAI", "Set LLM_PROVIDER=openai, OPENAI_BASE_URL=https://resource.openai.azure.com/..."],
-        ["Ollama (local)", "Set LLM_PROVIDER=openai, OPENAI_BASE_URL=http://localhost:11434/v1"],
+        ["Ollama — our fine-tuned local model", "Set LLM_PROVIDER=ollama, OLLAMA_MODEL=o11y-agent-14b. No cloud API calls at all."],
     ],
     col_widths=[2.2, 4.8]
 )
+
+add_heading(doc, "Self-Contained Deployment — No Cloud LLM Required", level=2, space_before=10)
+add_body(doc,
+    "For customer sites where routing telemetry analysis through AWS Bedrock or another "
+    "cloud LLM is not acceptable — data residency, procurement, network isolation — the "
+    "agent can run entirely self-contained. We fine-tuned our own 14B-parameter model "
+    "(Qwen2.5-14B, QLoRA fine-tuned on real incident tool-call transcripts) and package "
+    "it as a quantized GGUF served locally via Ollama. The only things that leave the "
+    "customer's network are read-only API calls to their own existing Splunk Observability "
+    "Cloud org — the model itself, and every token of reasoning it produces, stays on the box."
+)
+for b in [
+    "No AWS/Bedrock account or API key needed — three components ship: this repo, the "
+    "Supervisor UI, and the ~8.4 GB model weights",
+    "Runs on commodity hardware — validated end-to-end on a 4 vCPU / 16 GB RAM CPU-only "
+    "VM with no GPU, completing full specialist assessments with real findings",
+    "Live-tested to reliability parity with Bedrock across a 17-scenario fault-injection "
+    "suite (deployment errors, backend failures, database saturation, compound incidents) "
+    "— clean termination, correct tool-call grammar, and comparable root-cause quality",
+    "Scales up cleanly on GPU hardware for much faster turnaround per specialist when "
+    "available, with no code changes required",
+]:
+    add_bullet(doc, b)
 
 add_heading(doc, "Approval Workflow", level=2, space_before=10)
 add_body(doc,
@@ -615,15 +661,52 @@ for b in [
 ]:
     add_bullet(doc, b)
 
+add_heading(doc, "Remediation Engine", level=2, space_before=10)
+add_body(doc,
+    "After all ten specialists complete, the coordinator runs a rule-based remediation "
+    "pass that maps critical and high-severity issues to actionable operations. Each "
+    "remediation includes a specific action type, ready-to-execute arguments, and a flag "
+    "for whether it can be applied with zero manual configuration:"
+)
+add_two_col_table(doc,
+    ["Issue Pattern", "Action", "Auto-Applicable?"],
+    [
+        ["No detector / dark service (per-service)", "create_splunk_detector (error rate + latency)", "Yes"],
+        ["No detector coverage (org-wide)", "build_detectors", "Yes"],
+        ["OTel Collector unreachable", "reload_collector", "Yes"],
+        ["DB instrumentation missing (db.system absent)", "add_db_instrumentation", "Yes"],
+        ["DB attributes stripped by collector processor", "patch_collector_config", "No — needs review"],
+        ["Silent service / no telemetry", "restart_service", "Yes"],
+        ["Detector threshold too tight / noisy", "rebaseline_detectors", "Yes"],
+        ["Performance hotspot with profiling data", "generate_code_fix (file:line diff)", "No — needs review"],
+    ],
+    col_widths=[2.7, 2.6, 1.8]
+)
+
 add_heading(doc, "Splunk OTel Supervisor UI Integration", level=2, space_before=10)
 add_body(doc,
-    "The agent is designed to integrate with the Splunk OTel Supervisor — a UI-driven "
-    "observability control plane. The agent exposes a REST API that the Supervisor's job "
-    "runner calls as an o11y_assessment job type. Assessment findings flow into the "
-    "Supervisor's recommendation/approval panel, and the Supervisor's chat interface "
-    "can call the agent's tool-use loop to answer questions with real-time Splunk API data "
-    "rather than static context."
+    "The Splunk OTel Supervisor is the operator-facing web UI (default port 9090) that the "
+    "agent is designed to run behind. The agent exposes a REST API "
+    "(GET /api/assessment/latest) that the Supervisor proxies into its dedicated Agent tab "
+    "after every assessment cycle, giving management and on-call engineers a single place "
+    "to see current findings without touching the command line."
 )
+for b in [
+    ("Agent tab: ", "renders the full prioritized assessment — per-specialist findings, "
+     "severity, affected services, and the cross-domain summary — refreshed automatically "
+     "after each run"),
+    ("Pending Remediations panel: ", "every remediation the coordinator generated appears "
+     "as a card with a one-click Apply button, plus a bulk \"Apply Selected\" action for "
+     "clearing a batch of low-risk fixes at once"),
+    ("Chat assistant: ", "a conversational interface backed by the same LLM the specialists "
+     "use — operators can ask natural-language questions (\"why is checkout latency "
+     "spiking?\") or issue remediation requests directly (\"apply the detector fix for "
+     "checkout-service\") without leaving the UI"),
+    ("Works with either LLM backend: ", "the Supervisor talks to the same Bedrock or local "
+     "Ollama model the agent is configured with, so the chat experience is identical "
+     "regardless of deployment mode"),
+]:
+    add_bullet(doc, b[1], bold_prefix=b[0])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -659,6 +742,12 @@ add_two_col_table(doc,
         ["Platform health reviews happen quarterly at best",
          "Automated assessment runs every 60 minutes with persistent trend context across runs",
          "Continuous validation — not a point-in-time snapshot"],
+        ["CPU hotspots sit undiagnosed for lack of profiling expertise",
+         "Performance specialist reads live flamegraphs and generates an exact file:line code fix using the real source",
+         "Cuts performance triage from a multi-hour deep-dive to a reviewable pull request"],
+        ["Cloud LLM dependency is a blocker for regulated/air-gapped customer environments",
+         "Self-contained deployment runs our own fine-tuned 14B model locally via Ollama — no data leaves the customer network",
+         "Unlocks deployment at customers who cannot send telemetry analysis to a third-party cloud LLM"],
     ],
     col_widths=[1.9, 2.7, 2.5]
 )
