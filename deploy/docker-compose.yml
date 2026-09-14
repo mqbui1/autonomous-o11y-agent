@@ -84,6 +84,25 @@ services:
       - ollama-data:/root/.ollama
     environment:
       - OLLAMA_KEEP_ALIVE=24h
+      # Confirmed 2026-09-13 (RunPod A6000 GPU parity re-test): default
+      # OLLAMA_NUM_PARALLEL (effectively 1) serializes all specialist calls
+      # even though the GPU sits at only 36-44% utilization on a single
+      # request. A same-day full sweep of 1/4/5/6/7/8 (isolated throughput
+      # bench + live adFailure end-to-end run at each value) found 7 is the
+      # true ceiling, not 4: per-request latency stays flat (~15.6-15.9s for
+      # a fixed 300-token completion) from 4 through 7 while aggregate
+      # throughput keeps climbing (76.9 -> 132.0 tok/s), then BOTH regress at
+      # 8 (latency jumps to 18.3s, throughput plateaus at 131.4) -- 8 is where
+      # Ollama starts spinning up a second llama-server process instead of
+      # batching within one, which is the degradation mechanism. Live
+      # end-to-end on the same adFailure scenario: 4 -> 10.3min, 7 -> 9.2min,
+      # 8 -> 14.6min, all with zero quality/error regression. Set
+      # SPECIALIST_MAX_CONCURRENCY=7 in .env to match (default is 3 for
+      # non-bedrock providers, config.py) -- this is a GPU-host-specific
+      # tuning; do NOT apply to docker-compose.cpu.yml, where the CPU-bound
+      # finding is the opposite (concurrency > 1 is catastrophically worse
+      # due to thread contention, see ec2-deploy.md).
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-7}
     deploy:
       resources:
         reservations:
@@ -122,6 +141,15 @@ services:
       # Ollama (LLM_PROVIDER=ollama)
       - OLLAMA_MODEL
       - OLLAMA_BASE_URL
+      # Optional: split specialists across multiple Ollama instances to get
+      # real concurrency on a single-slot-per-instance CPU host (see
+      # providers/__init__.py's _SPECIALIST_SLOT). Comma-separated URLs.
+      - OLLAMA_BASE_URLS
+      - OLLAMA_MAX_TOKENS
+      # Optional per-specialist model right-sizing, e.g.
+      # "health=qwen2.5:3b,logs=qwen2.5:3b,db=qwen2.5:7b" — see
+      # config.py's specialist_model_overrides.
+      - OLLAMA_SPECIALIST_MODELS
       # OpenAI-compatible (LLM_PROVIDER=openai)
       - OPENAI_BASE_URL
       - OPENAI_API_KEY
