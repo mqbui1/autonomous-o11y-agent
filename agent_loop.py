@@ -1,7 +1,7 @@
 """
 LLM tool-calling loop — provider-agnostic.
 
-Supports AWS Bedrock and any OpenAI-compatible endpoint (Luna, Azure, Vertex, Ollama).
+Supports AWS Bedrock and any OpenAI-compatible endpoint (Azure, Vertex, Ollama).
 Provider is selected via AgentConfig.llm_provider ("bedrock" | "openai").
 
 When the model returns multiple tool_use blocks in a single turn, all are
@@ -351,7 +351,8 @@ def run_agent(
         else:
             messages.append(raw)
 
-        logger.debug("Turn %d: stop_reason=%s", turn + 1, stop_reason)
+        _tool_names = [tu.get("name") for tu in result.get("tool_uses", [])]
+        logger.info("Turn %d: stop_reason=%s tools=%s", turn + 1, stop_reason, _tool_names)
 
         if stop_reason == "end_turn":
             turns_remaining = max_turns - (turn + 1)
@@ -635,6 +636,29 @@ def run_agent(
     return "Agent reached max turns without completing."
 
 
+
+# Global cap on any single tool result's size before it enters conversation
+# history. Every subsequent turn re-sends the full message history (including
+# every prior tool result) to the model, so an oversized result from turn 1
+# gets re-prefilled on turns 2, 3, 4... — a real, compounding per-token compute
+# cost on CPU hosts, not just a one-time cost. governance.py's _truncate_scan
+# already does this per-tool at 6000 chars; this applies the same cap
+# uniformly across all tools as a backstop. Truncates from the tail (matches
+# _truncate_scan's approach) so _TIMEOUT_RE/_TOOL_ERROR_RE — which both match
+# near the start of a message — are unaffected.
+_MAX_TOOL_RESULT_CHARS = 6000
+
+
+def _truncate_tool_result(text: str) -> str:
+    if len(text) <= _MAX_TOOL_RESULT_CHARS:
+        return text
+    cut = text[:_MAX_TOOL_RESULT_CHARS]
+    last_nl = cut.rfind("\n")
+    if last_nl > _MAX_TOOL_RESULT_CHARS // 2:
+        cut = cut[:last_nl]
+    return cut + f"\n... [output truncated — {len(text) - len(cut)} chars omitted]"
+
+
 def _execute_parallel(
     tool_uses: list[dict], tool_fns: dict[str, Callable], provider
 ) -> tuple[list[dict], dict[str, str]]:
@@ -649,7 +673,7 @@ def _execute_parallel(
         for future in as_completed(futures):
             tool_use_id = futures[future]
             try:
-                id_to_result[tool_use_id] = future.result()
+                id_to_result[tool_use_id] = _truncate_tool_result(future.result())
             except Exception as exc:
                 id_to_result[tool_use_id] = f"Tool execution error: {exc}"
 

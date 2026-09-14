@@ -78,9 +78,9 @@ def provision_agent_dashboard(environment: str = "") -> str:
             "dashboard_id": dashboard_id,
             "dashboard_url": url,
             "message": f"O11y Agent dashboard created: {url}",
-        }, indent=2)
+        })
     except Exception as exc:
-        return json.dumps({"status": "error", "message": str(exc)}, indent=2)
+        return json.dumps({"status": "error", "message": str(exc)})
 
 
 def _build_charts(env_filter: str) -> list[dict]:

@@ -62,7 +62,7 @@ def analyze_instrumentation(
         with open(out_path) as f:
             data = json.load(f)
         Path(out_path).unlink(missing_ok=True)
-        return json.dumps(data, indent=2)
+        return json.dumps(data)
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "analyze_instrumentation")

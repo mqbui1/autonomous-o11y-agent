@@ -63,7 +63,7 @@ def get_source_status() -> str:
             "source_root": _SOURCE_ROOT,
             "top_level_dirs": entries,
             "note": "Read source files with get_source_context(file_path, line, service).",
-        }, indent=2)
+        })
     if mode == "github":
         return json.dumps({
             "source_available": True,
@@ -71,7 +71,7 @@ def get_source_status() -> str:
             "repo": _GITHUB_REPO,
             "branch": _GITHUB_BRANCH,
             "note": "GitHub API access configured. Use get_source_context with the file path from profiling frames.",
-        }, indent=2)
+        })
     return json.dumps({
         "source_available": False,
         "mode": "none",
@@ -80,7 +80,7 @@ def get_source_status() -> str:
             "GITHUB_TOKEN + GITHUB_REPO env vars to enable code-level fix generation. "
             "Profiling data (file:line:function) and pattern-based fixes are still available."
         ),
-    }, indent=2)
+    })
 
 
 def get_source_context(
@@ -116,7 +116,7 @@ def get_source_context(
             "Set SOURCE_ROOT or GITHUB_TOKEN + GITHUB_REPO to enable code reads. "
             "You can still describe the likely fix based on the operation pattern and profiling frame."
         ),
-    }, indent=2)
+    })
 
 
 def search_source_for_function(
@@ -141,12 +141,12 @@ def search_source_for_function(
             "source_available": False,
             "function_name": function_name,
             "note": "Source access not configured.",
-        }, indent=2)
+        })
 
     # Build candidate paths to search
     root = Path(_SOURCE_ROOT) if mode == "local" else None
     if root is None:
-        return json.dumps({"source_available": False, "note": "GitHub function search not yet implemented."}, indent=2)
+        return json.dumps({"source_available": False, "note": "GitHub function search not yet implemented."})
 
     # Resolve service directory
     search_root = root
@@ -192,17 +192,17 @@ def search_source_for_function(
                 "function_name": function_name,
                 "found": False,
                 "note": f"Function '{function_name}' not found in source. Check the function name spelling from the profiling frame.",
-            }, indent=2)
+            })
 
         return json.dumps({
             "source_available": True,
             "function_name": function_name,
             "found": True,
             "matches": results,
-        }, indent=2)
+        })
 
     except Exception as exc:
-        return json.dumps({"source_available": True, "error": str(exc)}, indent=2)
+        return json.dumps({"source_available": True, "error": str(exc)})
 
 
 def list_service_files(service: str, extension: str = "*.py") -> str:
@@ -216,9 +216,9 @@ def list_service_files(service: str, extension: str = "*.py") -> str:
     """
     mode = _source_mode()
     if mode == "none":
-        return json.dumps({"source_available": False, "note": "Source access not configured."}, indent=2)
+        return json.dumps({"source_available": False, "note": "Source access not configured."})
     if mode != "local":
-        return json.dumps({"source_available": False, "note": "list_service_files only works in local mode."}, indent=2)
+        return json.dumps({"source_available": False, "note": "list_service_files only works in local mode."})
 
     root = Path(_SOURCE_ROOT)
     svc_root = root / service if (root / service).exists() else root
@@ -240,9 +240,9 @@ def list_service_files(service: str, extension: str = "*.py") -> str:
             "root": str(svc_root.relative_to(root)),
             "file_count": len(files),
             "files": files,
-        }, indent=2)
+        })
     except Exception as exc:
-        return json.dumps({"source_available": True, "error": str(exc)}, indent=2)
+        return json.dumps({"source_available": True, "error": str(exc)})
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ def _read_local(file_path: str, line: int, service: str, context_lines: int) -> 
             "found": False,
             "note": f"File not found under SOURCE_ROOT={_SOURCE_ROOT}. "
                     f"The profiling frame path may be relative to the build directory.",
-        }, indent=2)
+        })
 
     try:
         all_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -307,10 +307,10 @@ def _read_local(file_path: str, line: int, service: str, context_lines: int) -> 
             "lines_shown": f"{start+1}-{end}",
             "total_lines": total,
             "code": snippet,
-        }, indent=2)
+        })
 
     except Exception as exc:
-        return json.dumps({"source_available": True, "file_path": file_path, "error": str(exc)}, indent=2)
+        return json.dumps({"source_available": True, "file_path": file_path, "error": str(exc)})
 
 
 def _read_github(file_path: str, line: int, service: str, context_lines: int) -> str:
@@ -351,13 +351,13 @@ def _read_github(file_path: str, line: int, service: str, context_lines: int) ->
                     "lines_shown": f"{start+1}-{end}",
                     "total_lines": total,
                     "code": snippet,
-                }, indent=2)
+                })
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 continue
-            return json.dumps({"source_available": True, "error": f"GitHub API {e.code}: {e.read().decode()[:200]}"}, indent=2)
+            return json.dumps({"source_available": True, "error": f"GitHub API {e.code}: {e.read().decode()[:200]}"})
         except Exception as exc:
-            return json.dumps({"source_available": True, "error": str(exc)}, indent=2)
+            return json.dumps({"source_available": True, "error": str(exc)})
 
     return json.dumps({
         "source_available": True,
@@ -365,7 +365,7 @@ def _read_github(file_path: str, line: int, service: str, context_lines: int) ->
         "found": False,
         "note": f"File not found in {_GITHUB_REPO}@{_GITHUB_BRANCH}. "
                 f"Tried paths: {candidates}",
-    }, indent=2)
+    })
 
 
 # ── Tool registry ──────────────────────────────────────────────────────────────

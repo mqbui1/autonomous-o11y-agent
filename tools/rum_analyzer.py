@@ -15,6 +15,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 from ._runner import get_config
@@ -122,16 +123,16 @@ def list_rum_apps() -> str:
                     "recorded in the last 7 days. To instrument the frontend, add the Splunk RUM "
                     "JavaScript snippet (see deploy/06-enable-rum.sh)."
                 ),
-            }, indent=2)
+            })
 
         return json.dumps({
             "configured": True,
             "apps": list(apps.values()),
             "message": f"Found {len(apps)} RUM application(s): {', '.join(apps.keys())}",
-        }, indent=2)
+        })
 
     except Exception as exc:
-        return json.dumps({"error": str(exc), "configured": False, "apps": []}, indent=2)
+        return json.dumps({"error": str(exc), "configured": False, "apps": []})
 
 
 def get_rum_metrics(app_name: str, hours: int = 24) -> str:
@@ -161,14 +162,22 @@ def get_rum_metrics(app_name: str, hours: int = 24) -> str:
             "cls_p75":  f'data("rum.webvitals_cls.score.p75", {filter_clause}).mean().publish()',
         }
 
-        metrics: dict[str, float | None] = {}
-        for key, prog in programs.items():
+        def _run(prog: str) -> float | None:
             try:
                 series = _signalflow(prog, hours=hours).get("series", {})
                 vals = list(series.values())
-                metrics[key] = vals[0][-1] if vals and vals[0] else None
+                return vals[0][-1] if vals and vals[0] else None
             except Exception:
-                metrics[key] = None
+                return None
+
+        # Five independent SignalFlow queries — run concurrently instead of
+        # sequentially (confirmed live: contributed to a 6:17 gap in the rum
+        # specialist).
+        metrics: dict[str, float | None] = {}
+        with ThreadPoolExecutor(max_workers=len(programs)) as pool:
+            futures = {key: pool.submit(_run, prog) for key, prog in programs.items()}
+            for key, fut in futures.items():
+                metrics[key] = fut.result()
 
         sessions = metrics.get("sessions") or 0
         errors = metrics.get("errors") or 0
@@ -216,10 +225,10 @@ def get_rum_metrics(app_name: str, hours: int = 24) -> str:
                 f"{app_name}: {int(sessions)} sessions, {error_rate:.1f}% error rate "
                 f"in last {hours}h. LCP={lcp_grade(lcp)}, INP={inp_grade(inp)}, CLS={cls_grade(cls_val)}."
             ),
-        }, indent=2)
+        })
 
     except Exception as exc:
-        return json.dumps({"error": str(exc), "app": app_name}, indent=2)
+        return json.dumps({"error": str(exc), "app": app_name})
 
 
 def get_rum_errors(app_name: str, hours: int = 6) -> str:
@@ -258,10 +267,10 @@ def get_rum_errors(app_name: str, hours: int = 6) -> str:
             "total_errors": int(total),
             "top_errors": errors[:10],
             "message": f"{app_name}: {int(total)} JS errors in last {hours}h. Top {len(errors[:10])} error types shown.",
-        }, indent=2)
+        })
 
     except Exception as exc:
-        return json.dumps({"error": str(exc), "app": app_name}, indent=2)
+        return json.dumps({"error": str(exc), "app": app_name})
 
 
 SCHEMAS = [

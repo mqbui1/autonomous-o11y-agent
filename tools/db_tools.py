@@ -203,7 +203,7 @@ def get_service_dependency_map(environment: str, lookback_minutes: int = 60) -> 
                 "Topology edges and inferred (DB/external) service detection are no longer "
                 "available via API. Showing active instrumented services from SignalFlow metrics."
             ),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_service_dependency_map error]: {exc}"
 
@@ -310,7 +310,7 @@ def search_slow_outbound_calls(
                 "Returning p99 latency per service+operation from SignalFlow instead of individual traces. "
                 "Operations are sorted by p99 latency descending."
             ),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[search_slow_outbound_calls error]: {exc}"
 
@@ -380,7 +380,7 @@ def get_outbound_call_error_rates(environment: str, hours: int = 1) -> str:
             "lookback_hours": hours,
             "services": service_stats,
             "high_error_services": [s for s in service_stats if s["error_rate_pct"] > 1.0],
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_outbound_call_error_rates error]: {exc}"
 
@@ -460,7 +460,7 @@ def find_db_instrumented_services(environment: str) -> str:
                 "Missing db.operation → cannot see SELECT vs INSERT breakdown. "
                 "Missing db.system → cannot identify the database technology."
             ),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[find_db_instrumented_services error]: {exc}"
 

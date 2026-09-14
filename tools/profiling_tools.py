@@ -139,7 +139,7 @@ def get_profiling_services(environment: str) -> str:
                 "service_count": len(local_services),
                 "services": [{"name": s, "types": ["cpu"]} for s in local_services],
                 "note": "Data from local OTLP fan-out capture (last 10 minutes).",
-            }, indent=2)
+            })
 
     try:
         data = _api(f"{_PROFILING_API}/services?environment={environment}&limit=100")
@@ -153,13 +153,13 @@ def get_profiling_services(environment: str) -> str:
                     "AlwaysOn Profiling requires SPLUNK_PROFILER_ENABLED=true in the "
                     "Splunk OTel Java/Python agent. Span-based pattern analysis is still available."
                 ),
-            }, indent=2)
+            })
         return json.dumps({
             "profiling_available": True,
             "environment": environment,
             "service_count": len(services),
             "services": services,
-        }, indent=2)
+        })
     except Exception as exc:
         # Profiling API may return 404 if the feature is not enabled
         return json.dumps({
@@ -171,7 +171,7 @@ def get_profiling_services(environment: str) -> str:
                 "or the API endpoint differs for this realm. "
                 "Span-based pattern analysis can still detect N+1 queries and hot operation paths."
             ),
-        }, indent=2)
+        })
 
 
 def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 60) -> str:
@@ -208,7 +208,7 @@ def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 6
                     "Look for application code frames (not framework/stdlib) with >5% CPU — "
                     "these are your optimization targets."
                 ),
-            }, indent=2)
+            })
 
     try:
         payload = {
@@ -230,7 +230,7 @@ def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 6
                     f"No CPU profiling data for {service} in the last {lookback_minutes}m. "
                     "Either profiling is not enabled for this service, or no CPU samples were collected."
                 ),
-            }, indent=2)
+            })
 
         # Normalize frame format
         normalized = []
@@ -258,7 +258,7 @@ def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 6
                 "Look for application code frames (not framework/stdlib) with >5% CPU — "
                 "these are your optimization targets."
             ),
-        }, indent=2)
+        })
 
     except Exception as exc:
         return json.dumps({
@@ -266,7 +266,7 @@ def get_cpu_flamegraph(service: str, environment: str, lookback_minutes: int = 6
             "profiling_available": False,
             "error": str(exc),
             "note": "CPU profiling data unavailable. Use analyze_span_call_patterns for span-based analysis.",
-        }, indent=2)
+        })
 
 
 def get_memory_profile(service: str, environment: str, lookback_minutes: int = 60) -> str:
@@ -301,7 +301,7 @@ def get_memory_profile(service: str, environment: str, lookback_minutes: int = 6
                 "service": service,
                 "profiling_available": False,
                 "note": f"No memory profiling data for {service}. Requires SPLUNK_PROFILER_MEMORY_ENABLED=true.",
-            }, indent=2)
+            })
 
         normalized = []
         for f in frames[:20]:
@@ -324,14 +324,14 @@ def get_memory_profile(service: str, environment: str, lookback_minutes: int = 6
                 "If allocations grow over time without corresponding GC reclamation, "
                 "this indicates a memory leak. Check for unbounded collections or caches."
             ),
-        }, indent=2)
+        })
 
     except Exception as exc:
         return json.dumps({
             "service": service,
             "profiling_available": False,
             "error": str(exc),
-        }, indent=2)
+        })
 
 
 def analyze_span_call_patterns(
@@ -491,7 +491,7 @@ def analyze_span_call_patterns(
             "top_operations_by_call_count": operations[:20],
             "antipatterns_detected": antipatterns,
             "high_error_operations": high_error_ops[:10],
-        }, indent=2)
+        })
 
     except Exception as exc:
         return f"[analyze_span_call_patterns error]: {exc}"
@@ -533,7 +533,7 @@ def get_thread_profile(service: str, environment: str, lookback_minutes: int = 3
                 "service": service,
                 "profiling_available": False,
                 "note": "Thread profiling data unavailable.",
-            }, indent=2)
+            })
 
         total = sum(states.values()) or 1
         state_pct = {k: round(v / total * 100, 1) for k, v in states.items()}
@@ -554,14 +554,14 @@ def get_thread_profile(service: str, environment: str, lookback_minutes: int = 3
             "thread_state_distribution": state_pct,
             "thread_state_counts": states,
             "issues": issues,
-        }, indent=2)
+        })
 
     except Exception as exc:
         return json.dumps({
             "service": service,
             "profiling_available": False,
             "error": str(exc),
-        }, indent=2)
+        })
 
 
 def get_slowest_methods(
@@ -613,7 +613,7 @@ def get_slowest_methods(
             "error": "Time window must be between 0 and 24 hours.",
             "from_epoch_ms": from_epoch_ms,
             "to_epoch_ms": to_epoch_ms,
-        }, indent=2)
+        })
 
     limit = min(limit, 5)
 
@@ -638,7 +638,7 @@ def get_slowest_methods(
                     "window_to_ms": to_epoch_ms,
                     "note": "Data from agent-local snapshot store (pprof fan-out via OTel Collector).",
                 },
-            }, indent=2)
+            })
     except Exception as _exc:
         logger.debug("Local snapshot store lookup failed: %s", _exc)
 
@@ -650,7 +650,7 @@ def get_slowest_methods(
             "error": "Could not resolve Splunk org ID (X-SF-OrgId). "
                      "Set SPLUNK_ORG_ID env var or ensure the token has org-read scope.",
             "note": "Fall back to get_cpu_flamegraph for aggregate profiling data.",
-        }, indent=2)
+        })
 
     try:
         path = (
@@ -679,7 +679,7 @@ def get_slowest_methods(
                     "Check that the span has splunk.snapshot.profiling=true attribute. "
                     "Fall back to get_cpu_flamegraph for aggregate data."
                 ),
-            }, indent=2)
+            })
 
         # Normalize output — surface the fields the LLM needs for code-level analysis
         normalized = []
@@ -714,7 +714,7 @@ def get_slowest_methods(
                 "exit_call shows what the method was blocked on (I/O, locks, etc.) when it "
                 "yielded — null means it was actively computing."
             ),
-        }, indent=2)
+        })
 
     except RuntimeError as exc:
         err = str(exc)
@@ -744,14 +744,14 @@ def get_slowest_methods(
                 "or SPLUNK_SNAPSHOT_PROFILER_SAMPLING_INTERVAL=1ms (Node.js)."
             ),
             "note": "Fall back to get_cpu_flamegraph for aggregate profiling data.",
-        }, indent=2)
+        })
     except Exception as exc:
         return json.dumps({
             "service": service,
             "trace_id": trace_id,
             "profiling_available": False,
             "error": str(exc),
-        }, indent=2)
+        })
 
 
 # ── Tool registry ──────────────────────────────────────────────────────────────

@@ -68,7 +68,7 @@ def check_detector_health(max_detectors: int = 200) -> str:
             data = json.load(f)
         Path(out_path).unlink(missing_ok=True)
         filtered = _filter_detector_checks(data, cfg.environment)
-        return json.dumps(filtered, indent=2)
+        return json.dumps(filtered)
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "check_detector_health")
@@ -120,7 +120,7 @@ def check_apm_health(hours: int = 24) -> str:
             data = json.load(f)
         Path(out_path).unlink(missing_ok=True)
         filtered = _filter_apm_checks(data, cfg.environment)
-        return json.dumps(filtered, indent=2)
+        return json.dumps(filtered)
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "check_apm_health")
@@ -155,7 +155,7 @@ def check_otel_collector_health(lookback_hours: int = 4) -> str:
         with open(out_path) as f:
             data = json.load(f)
         Path(out_path).unlink(missing_ok=True)
-        return json.dumps(data, indent=2)
+        return json.dumps(data)
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "check_otel_collector_health")
@@ -189,7 +189,7 @@ def check_license_utilization(days: int = 30) -> str:
         with open(out_path) as f:
             data = json.load(f)
         Path(out_path).unlink(missing_ok=True)
-        return json.dumps(data, indent=2)
+        return json.dumps(data)
     except Exception:
         Path(out_path).unlink(missing_ok=True)
         return summarise(rc, stdout, stderr, "check_license_utilization")

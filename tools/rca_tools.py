@@ -156,7 +156,7 @@ def get_active_incidents(environment: str = "") -> str:
                 "triggeredAt": inc.get("triggeredAt"),
                 "inputs": inc.get("inputs", {}),
             })
-        return json.dumps({"count": len(trimmed), "incidents": trimmed}, indent=2)
+        return json.dumps({"count": len(trimmed), "incidents": trimmed})
     except Exception as exc:
         return f"[get_active_incidents error]: {exc}"
 
@@ -245,7 +245,7 @@ def search_error_traces(
             "time_range_ms": [start_ms, end_ms],
             "erroring_operations": rows[:limit],
             "total_erroring_ops": len(rows),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[search_error_traces error]: {exc}"
 
@@ -288,13 +288,13 @@ query GetTraceAnalysis($traceId: ID!) {
                 "note": "getTraceAnalysis is no longer available in the APM GraphQL schema. "
                         "Use search_error_traces to identify erroring services/operations instead.",
                 "graphql_errors": errors,
-            }, indent=2)
+            })
         analysis = resp.get("data", {}).get("getTraceAnalysis", {})
         return json.dumps({
             "traceId": trace_id,
             "topLatencyContributors": analysis.get("topLatencyContributors", []),
             "errorContributors": analysis.get("errorContributors", []),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_trace_analysis error]: {exc}"
 
@@ -369,7 +369,7 @@ def get_service_topology(environment: str, lookback_minutes: int = 60) -> str:
             "service_count": len(services),
             "services": services,
             "error_services": error_services,
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_service_topology error]: {exc}"
 
@@ -438,7 +438,7 @@ def find_change_events(environment: str, start_ms: int, end_ms: int) -> str:
             "time_range_ms": [start_ms, end_ms],
             "event_count": len(trimmed),
             "events": trimmed,
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[find_change_events error]: {exc}"
 
@@ -494,7 +494,7 @@ def get_service_error_rate(service: str = "", environment: str = "", hours: int 
             "error_rate_pct": round(error_rate_pct, 2),
             "peak_error_count_per_minute": round(peak_errors),
             "data_points": len(err_vals),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_service_error_rate error]: {exc}"
 
@@ -555,7 +555,7 @@ def get_service_latency(service: str, environment: str, hours: int = 1) -> str:
             "p99_peak_ms": round(peak_ns / 1_000_000, 1),
             "p99_latest_ms": round(latest_ns / 1_000_000, 1),
             "data_points": len(all_vals),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_service_latency error]: {exc}"
 
@@ -676,7 +676,7 @@ def get_infra_metrics(environment: str, service: str = "", hours: int = 1) -> st
             "k8s_cpu values are percent (0-100). k8s_memory in MB. "
             "Empty metrics means no data found for this service/environment."
         ),
-    }, indent=2)
+    })
 
 
 # ── Tool registry ─────────────────────────────────────────────────────────────

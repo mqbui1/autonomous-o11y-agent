@@ -12,6 +12,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from ._runner import get_config
@@ -65,7 +66,7 @@ def get_broken_detectors() -> str:
             "Disabled detectors will never fire. Detectors with no notification rules "
             "fire internally but page nobody — equivalent to a broken smoke alarm."
         ),
-    }, indent=2)
+    })
 
 
 # ── 2. Token health ───────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ def get_token_health() -> str:
             "Expired tokens silently break data ingestion and API calls with no error "
             "surfaced in dashboards. Rotate before expiry."
         ),
-    }, indent=2)
+    })
 
 
 # ── 3. SDK coverage ───────────────────────────────────────────────────────────
@@ -127,9 +128,13 @@ def get_sdk_coverage() -> str:
         except Exception:
             return []
 
-    lang_dims    = dim_values("telemetry.sdk.language")
-    version_dims = dim_values("telemetry.sdk.version")
-    name_dims    = dim_values("telemetry.sdk.name")
+    # Three independent Dimension API calls — run concurrently instead of
+    # sequentially (confirmed live: this took 6:32 sequential).
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        lang_fut = pool.submit(dim_values, "telemetry.sdk.language")
+        version_fut = pool.submit(dim_values, "telemetry.sdk.version")
+        name_fut = pool.submit(dim_values, "telemetry.sdk.name")
+        lang_dims, version_dims, name_dims = lang_fut.result(), version_fut.result(), name_fut.result()
 
     languages = sorted({d["value"] for d in lang_dims if d.get("value")})
     versions  = sorted({d["value"] for d in version_dims if d.get("value")})
@@ -165,7 +170,7 @@ def get_sdk_coverage() -> str:
             "Pre-1.0 SDKs use unstable semantic conventions — span attribute names may "
             "differ from current OTel spec, causing gaps in service maps and APM metrics."
         ),
-    }, indent=2)
+    })
 
 
 # ── Schemas + registry ────────────────────────────────────────────────────────

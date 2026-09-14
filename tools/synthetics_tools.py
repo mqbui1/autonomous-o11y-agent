@@ -90,7 +90,7 @@ def list_synthetics_tests(environment: str = "") -> str:
             "inactive_count": len(inactive),
             "failing_tests": [t["name"] for t in failing],
             "tests": trimmed,
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[list_synthetics_tests error]: {exc}"
 
@@ -155,7 +155,7 @@ def get_test_results(test_id: str, hours: int = 24) -> str:
                 }
                 for r in results[:10]
             ],
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_test_results error]: {exc}"
 
@@ -202,7 +202,7 @@ def get_synthetics_coverage_gaps(services: list, environment: str = "") -> str:
                 "A match does not guarantee the test actually exercises that service's "
                 "critical paths — review test details for completeness."
             ),
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_synthetics_coverage_gaps error]: {exc}"
 
@@ -286,7 +286,7 @@ def get_test_performance_trend(test_id: str, hours: int = 48) -> str:
             "trend_direction": "degrading" if trend_pct > 10 else "improving" if trend_pct < -10 else "stable",
             "hourly_avg_duration_ms": hourly_avg,
             "by_location": location_summary,
-        }, indent=2)
+        })
     except Exception as exc:
         return f"[get_test_performance_trend error]: {exc}"
 
