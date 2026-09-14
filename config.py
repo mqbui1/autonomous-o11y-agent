@@ -56,6 +56,30 @@ class AgentConfig:
     ollama_model: str = field(
         default_factory=lambda: os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
     )
+    # Optional comma-separated list of additional Ollama instances (each with
+    # its own OLLAMA_NUM_PARALLEL=1 slot) to split specialists across, e.g.
+    # "http://ollama:11434/v1,http://ollama:11435/v1". A single-slot local
+    # Ollama server otherwise serializes ALL 10 specialists regardless of
+    # specialist_max_concurrency — this is the real fix for that ceiling.
+    # Falls back to just [ollama_base_url] when unset (no behavior change).
+    ollama_base_urls: list = field(
+        default_factory=lambda: [
+            u.strip() for u in os.environ.get("OLLAMA_BASE_URLS", "").split(",") if u.strip()
+        ] or [os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")]
+    )
+    # Optional per-specialist model right-sizing on CPU-bound local Ollama
+    # hosts, e.g. "health=qwen2.5:3b,logs=qwen2.5:3b,db=qwen2.5:7b". Specialists
+    # not listed fall back to ollama_model (the "brain" model — keep the most
+    # capable model there; a 3B model has previously hallucinated/misattributed
+    # findings when asked to reason across domains, see coordinator.py's
+    # _synthesize docstring, 2026-07-22). Ignored for bedrock/openai providers.
+    specialist_model_overrides: dict = field(
+        default_factory=lambda: dict(
+            pair.split("=", 1)
+            for pair in os.environ.get("OLLAMA_SPECIALIST_MODELS", "").split(",")
+            if "=" in pair
+        )
+    )
 
     # OpenAI-compatible (Azure, Vertex, custom endpoints)
     openai_base_url: str = field(
@@ -66,6 +90,16 @@ class AgentConfig:
     )
     openai_model: str = field(
         default_factory=lambda: os.environ.get("OPENAI_MODEL", "")
+    )
+    # Safety-net cap on generated tokens per LLM call for local/self-hosted
+    # models (ollama/openai providers only — Bedrock is fast enough and its
+    # own API doesn't need this guardrail). CPU decode on a 14B model runs
+    # at ~2-3 tok/s; without a cap, a rambling or non-terminating generation
+    # (documented local-model failure mode, see training.md) can add many
+    # extra minutes to a single specialist turn. Generous enough to not
+    # truncate legitimate multi-issue submit_findings payloads.
+    specialist_max_output_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("OLLAMA_MAX_TOKENS", "3000"))
     )
 
     subprocess_timeout: int = field(

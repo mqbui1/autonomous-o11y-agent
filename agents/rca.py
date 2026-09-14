@@ -130,7 +130,7 @@ def run(
     prompt = "\n\n---\n\n".join(parts)
 
     raw_text = run_agent(
-        provider=get_provider(config),
+        provider=get_provider(config, specialist="rca"),
         system_prompt=_SYSTEM + f'\n\nEnvironment: "{config.environment}"',
         tools=all_schemas,
         tool_fns=all_tool_fns,

@@ -226,7 +226,7 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
     prompt = f"{state_context}\n\n---\n\n{task_with_tier}" if state_context else task_with_tier
 
     raw_text = run_agent(
-        provider=get_provider(config),
+        provider=get_provider(config, specialist="performance"),
         system_prompt=_SYSTEM + f'\n\nEnvironment: "{config.environment}"',
         tools=all_schemas,
         tool_fns=all_tool_fns,

@@ -2,11 +2,15 @@
 OpenAI-compatible provider.
 
 Works with any endpoint that implements the OpenAI Chat Completions API:
-  - Galileo Luna (self-hosted)
   - Azure OpenAI
   - Google Vertex AI (via openai compatibility layer)
   - Ollama (local models)
   - Any OpenAI-API-compatible server
+
+Note: Galileo Luna is NOT compatible here — it's a fine-tuned classifier
+(binary True/False log-prob scoring for eval metrics like groundedness/
+toxicity), not a general-purpose chat/tool-calling model. It has no place
+in this provider's routing.
 """
 
 import json
@@ -58,13 +62,15 @@ class OpenAICompatProvider(LLMProvider):
     and maps message/response shapes between the two APIs.
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 900.0):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 900.0,
+                 max_tokens: int | None = None):
         if not _OPENAI_AVAILABLE:
             raise ImportError(
                 "openai package is required for LLM_PROVIDER=openai. "
                 "Install with: pip install openai>=1.0.0"
             )
         self.model = model
+        self.max_tokens = max_tokens
         # Explicit timeout matching config.specialist_timeout — the openai SDK's
         # own default (600s) is shorter than our specialist budget, so a slow
         # local model (e.g. queued behind other concurrent specialists on a
@@ -132,6 +138,8 @@ class OpenAICompatProvider(LLMProvider):
             "model": self.model,
             "messages": openai_messages,
         }
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
         if tools:
             # tools is already in OpenAI format (converted by agent_loop via convert_tools)
             kwargs["tools"] = tools

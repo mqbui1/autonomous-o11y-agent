@@ -49,7 +49,7 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
 
     prompt = f"{state_context}\n\n---\n\n{_TASK}" if state_context else _TASK
     raw_text = run_agent(
-        provider=get_provider(config),
+        provider=get_provider(config, specialist="governance"),
         system_prompt=_SYSTEM,
         tools=all_schemas,
         tool_fns=all_tool_fns,
