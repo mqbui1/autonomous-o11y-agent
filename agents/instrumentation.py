@@ -32,6 +32,11 @@ Run a complete instrumentation quality assessment:
    Flag any pre-1.0 (pre-stable) SDK versions as high severity — they use unstable
    semantic conventions that cause attribute name mismatches and APM gaps.
 
+Call each of these two tools EXACTLY ONCE. Their results are deterministic and will
+NOT change if you call them again — do not re-call either tool to "double check" or
+because you want more detail; the first result already has everything you need. Move
+straight to submit_findings as soon as you have both results.
+
 After completing your analysis, call submit_findings with your structured results.
 NOTE: Do NOT set instrumentation_score — it is computed automatically from the
 analyzer output. Focus on quality narrative in summary.
@@ -71,7 +76,7 @@ def run(config: AgentConfig, state_context: str = "") -> SpecialistFindings:
 
     prompt = f"{state_context}\n\n---\n\n{_TASK}" if state_context else _TASK
     raw_text = run_agent(
-        provider=get_provider(config),
+        provider=get_provider(config, specialist="instrumentation"),
         system_prompt=_SYSTEM,
         tools=all_schemas,
         tool_fns=all_tool_fns,
