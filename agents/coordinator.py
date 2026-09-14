@@ -93,16 +93,27 @@ def run_assessment(
         if streaming_with_pii:
             state_context_with_pii = (trend_context + "\n\n" + streaming_with_pii).strip()
 
+    # Order matters when config.specialist_max_concurrency < len(specialists):
+    # the ThreadPoolExecutor hands out its N worker slots to the first N
+    # submitted, and everything after that queues FIFO behind whichever of
+    # the first N finishes first. Confirmed 2026-09-13 (14b GPU parity re-run
+    # at max_concurrency=7): 'db' was submitted 9th and was consistently one
+    # of the two slowest-to-complete specialists across scenarios purely from
+    # queueing wait, not its own runtime. Swapped with 'logs' (consistently
+    # the fastest-finishing specialist by a wide margin in every sampled
+    # scenario, so even if queued it grabs a freed slot almost immediately
+    # and its own short runtime keeps its total wall-clock low regardless of
+    # position) -- 'db' now gets a guaranteed immediate slot instead.
     specialists = {
         "health": health_agent,
         "instrumentation": instrumentation_agent,
         "governance": governance_agent,
         "detector": detector_agent,
-        "logs": logs_agent,
+        "db": db_agent,
         "rum": rum_agent,
         "rca": rca_agent,
         "synthetics": synthetics_agent,
-        "db": db_agent,
+        "logs": logs_agent,
         "performance": performance_agent,
     }
 
@@ -509,7 +520,12 @@ def _build_health_snapshot(findings: dict[str, SpecialistFindings]) -> str:
         if not f:
             continue
         status = _domain_status(f)
-        if f.metrics:
+        # Belt-and-suspenders: tools/findings.py's _coerce_metrics() is the real
+        # fix point, but guard here too (same double-guardrail pattern as the
+        # 2026-09-07 Issue.service-as-list fix) in case metrics arrives
+        # malformed via any other path -- a crash here previously discarded
+        # the ENTIRE assessment run's report, not just this one snapshot row.
+        if isinstance(f.metrics, dict) and f.metrics:
             k, v = next(iter(f.metrics.items()))
             key_metric = f"{k}: {v}"
         elif f.instrumentation_score is not None:

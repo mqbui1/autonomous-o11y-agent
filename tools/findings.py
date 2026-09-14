@@ -199,12 +199,22 @@ SUBMIT_SCHEMA = {
                     "services_active": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Services currently reporting telemetry.",
+                        "description": (
+                            "Services currently reporting telemetry. Use ONLY real service "
+                            "names seen in this run's actual tool results — leave this empty "
+                            "if you don't have real data, never invent placeholder names "
+                            "(e.g. 'service1', 'service-a')."
+                        ),
                     },
                     "services_silent": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Services with no telemetry in the observation window.",
+                        "description": (
+                            "Services with no telemetry in the observation window. Use ONLY "
+                            "real service names seen in this run's actual tool results — "
+                            "leave this empty if you don't have real data, never invent "
+                            "placeholder names."
+                        ),
                     },
                     "instrumentation_score": {
                         "type": "integer",
@@ -242,7 +252,14 @@ SUBMIT_SCHEMA = {
                     "metrics": {
                         "type": "object",
                         "description": (
-                            "Domain-specific key metrics. Examples: "
+                            "Domain-specific key metrics, using REAL values copied from this "
+                            "run's actual tool results only. The key names below are examples "
+                            "of what to call each metric IF you have a real value for it — "
+                            "they are not a template to fill in with invented data. Omit any "
+                            "key you don't have a real value for; never substitute a generic "
+                            "placeholder (e.g. 'service1', 'metric1', 'rule1,rule2'). Leave "
+                            "this field empty ({}) entirely if no real metrics are available. "
+                            "Example key names by domain: "
                             "health → {detectors_healthy, detectors_critical, silent_service_count}, "
                             "instrumentation → {score, span_coverage_pct}, "
                             "governance → {top_cardinality_mts, anomaly_count, top_metrics}, "
@@ -318,6 +335,37 @@ def _coerce_str_list(items: Any) -> list[str]:
             if val.strip():
                 out.append(val)
     return out
+
+
+def _coerce_metrics(metrics: Any) -> dict:
+    """Coerce the metrics field to a plain dict. Confirmed 2026-09-12/13
+    (o11y-agent-14b GPU parity re-test, adManualGc scenario): a specialist
+    emitted metrics as a list instead of a dict -- schema says object, but a
+    plain-kwarg call doesn't enforce that at runtime. `metrics or {}`'s
+    falsy-check doesn't catch a non-empty list, so it survived all the way to
+    coordinator.py's `_build_health_snapshot()`, which crashed the ENTIRE
+    assessment run with AttributeError ('list' has no 'items') -- the same
+    failure shape as the 2026-09-07 `Issue.service`-as-list bug, just a
+    different field. Coerce here so every downstream consumer gets a real
+    dict, same double-guardrail philosophy as `_coerce_str_list`.
+    """
+    if not metrics:
+        return {}
+    if isinstance(metrics, dict):
+        return metrics
+    if isinstance(metrics, list):
+        out = {}
+        for i, item in enumerate(metrics):
+            if isinstance(item, dict) and "value" in item:
+                key = str(item.get("key") or item.get("name") or item.get("metric") or f"metric_{i + 1}")
+                out[key] = item["value"]
+            elif isinstance(item, str) and ":" in item:
+                key, _, val = item.partition(":")
+                out[key.strip()] = val.strip()
+            else:
+                out[f"metric_{i + 1}"] = item
+        return out
+    return {"value": metrics}
 
 
 def make_submit_fn(collector: dict, domain: str):
@@ -488,11 +536,12 @@ def make_submit_fn(collector: dict, domain: str):
         # real structured data the specialist did successfully report. Synthesize a
         # summary from score/metrics too, same rationale as the issues case above.
         elif cleaned_summary == malformed_marker and (instrumentation_score is not None or metrics):
+            coerced_metrics = _coerce_metrics(metrics)
             parts = []
             if instrumentation_score is not None:
                 parts.append(f"score {instrumentation_score}/100")
-            if metrics:
-                metric_str = ", ".join(f"{k}: {v}" for k, v in list(metrics.items())[:4])
+            if coerced_metrics:
+                metric_str = ", ".join(f"{k}: {v}" for k, v in list(coerced_metrics.items())[:4])
                 parts.append(metric_str)
             cleaned_summary = f"No issues reported. {'; '.join(parts)}."
         coerced_active = _coerce_str_list(services_active)
@@ -505,7 +554,7 @@ def make_submit_fn(collector: dict, domain: str):
             services_silent=coerced_silent,
             instrumentation_score=instrumentation_score,
             issues=parsed_issues,
-            metrics=metrics or {},
+            metrics=_coerce_metrics(metrics),
             actions_taken=_coerce_str_list(actions_taken),
             structured=True,
         )
